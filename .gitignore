@@ -1,0 +1,21 @@
+*.pdf
+
+# Built databases — rebuild with data_cli.py
+*.db
+*.db-wal
+*.db-shm
+*.db.building
+
+# Downloaded dumps, scratch files
+tmp/
+.to_be_deleted/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+COMMIT_MSG
+*.swp

@@ -1,0 +1,34 @@
+
+NOTEs / trade offs:
+
+- "eventual consistency": never a "consistent" snapshot
+
+- html.parser.HTMLParser subclass, hrefs only │ 3-5ms vs BeautifulSoup + html.parser │ 50-100ms
+    > not building a full DOM to cap cpu load
+
+    parser reliability:
+    4. html.parser is lenient, not spec-compliant. On malformed markup it can skip tags lxml would catch.
+    5. JS-loaded content. Anything not in the served HTML is invisible. Collapsed navboxes are fine (present, just hidden);
+    > html parsing is not always an "exact science". Stick to html.parser for simplicity of the context
+    > filtering out category pages bc they are giant hubs ("article links" from pdf)
+        > by section id="mw-content-text", and by name prefix within the content div
+
+- wikiparse-rs for sql->sqlite // wikiwalk / wiki-graph — full solutions, avoid
+    - did not look at wikiwalk OO design to build my own interpretation
+
+- production-ready, so the progress is stored on db
+    - if a link is in a page on db but not fetched yet, fetch+process
+        if it's a red link, do not retry for 24 hours
+
+        Simple walking, no lookahead within batch/chunk, or across chunks
+        All links we do not have are fetched in background, starting at the beginning of the chunk
+            The first one not yet fetched/processed blocks the loop.
+
+
+- db + Walker supports red links
+
+
+CachingLinkStore._fill      store.store() · store.mark_red_links()   ← via the interface
+
+
+
