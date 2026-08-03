@@ -1,3 +1,32 @@
+HOWTO:
+
+mkvirtualenv wikiwalker -a "$PWD" -p /opt/local/bin/python3.12
+! pip install -e ".[dev]"
+! pytest
+
+  ┌───────────────────────────────┬───────────────────────────────────────────────────────────────────────────┐
+  │            command            │                                   shows                                   │
+  ├───────────────────────────────┼───────────────────────────────────────────────────────────────────────────┤
+  │ walker.py --test L0 L3_26     │ shortcut found at depth 2, not 3                                          │
+  ├───────────────────────────────┼───────────────────────────────────────────────────────────────────────────┤
+  │ walker.py --test -v L0 Orphan │ exhausts the graph: 40 pages, batches of 3/10/26, Red_Link 404 → dead end │
+  ├───────────────────────────────┼───────────────────────────────────────────────────────────────────────────┤
+  │ walker.py --test L3_00 L0     │ leaf can't reach the root — no path, but complete                         │
+  ├───────────────────────────────┼───────────────────────────────────────────────────────────────────────────┤
+  │ walker.py --test Red_Link L0  │ red-link source: refused before any walk                                  │
+  └───────────────────────────────┴───────────────────────────────────────────────────────────────────────────┘
+
+
+The simplewiki semi-working example:
+
+cargo install wikiparse-rs  # to import the simple.wikipedia.org dump faster
+
+  python3 walker.py Bristol Cheese
+  python3 walker.py April Nigeria
+  python3 walker.py "South West England" "Walton Cardiff"
+
+
+
 
 NOTEs / trade offs:
 
@@ -28,7 +57,8 @@ NOTEs / trade offs:
 - db + Walker supports red links
 
 
-CachingLinkStore._fill      store.store() · store.mark_red_links()   ← via the interface
+TODO:
+- Review: CachingLinkStore._fill      store.store() · store.mark_red_links()   ← via the interface
 
 
 
