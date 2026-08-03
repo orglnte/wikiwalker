@@ -20,6 +20,7 @@ mkvirtualenv wikiwalker -a "$PWD" -p /opt/local/bin/python3.12
 The simplewiki semi-working example:
 
 cargo install wikiparse-rs  # to import the simple.wikipedia.org dump faster
+python3 data_cli.py simplewiki # sets up simplewiki.db (approx. 4GB)
 
   python3 walker.py Bristol Cheese
   python3 walker.py April Nigeria
