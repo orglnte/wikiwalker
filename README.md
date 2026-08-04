@@ -114,6 +114,8 @@ python3 data_cli.py empty --wiki {simplewiki,wikipedia-us} --force
 
 ## Notes and trade-offs
 
+simple.wikipedia.org has been added to facilitate tests (approx. 60 links per page vs 200-300).
+
 ### LinkStore
 
 1. An article, once stored, is **never refreshed**. The only refresh rule covers
