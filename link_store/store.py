@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 
 import logctx
 import wikifetcher
-from settings import DB_FILE, FETCH_TIMEOUT_S, RED_LINK_TTL_S, SITE
+from settings import DB_FILE, FETCH_TIMEOUT_S, NOT_FOUND_TTL_S, SITE
 
 from .batch import BatchLinks
 from .db import LinkDatabase, PageStatus
@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 # Stored status -> what it means. Absent from the store is a state too.
 STATE = {
     PageStatus.ARTICLE: "article",
-    PageStatus.REDLINK: "redlink",
+    PageStatus.NOTFOUND: "notfound",
     None: "unknown",
 }
 
@@ -27,7 +27,7 @@ class LinkStore:
     """Holds the links between pages, and retrieves what it does not hold.
 
     Given a batch of titles it answers from the database, and hands whatever is
-    missing to the fetcher. The answer is a mapping either way, so nothing
+    absent to the fetcher. The answer is a mapping either way, so nothing
     upstream learns which pages came off disk and which came off the wire.
 
     Without a fetcher it answers only from what it holds, which is the case
@@ -92,12 +92,12 @@ class LinkStore:
         if self._fetcher is not None:
             to_fetch = [t for t in wanted if t not in known]
 
-            # A red link becomes an article only when somebody writes one, so
-            # these are worth another look but rarely.
+            # A missing title becomes an article only when somebody writes one,
+            # so these are worth another look but rarely.
             stale = self._db.stale_titles(
                 [t for t, links in known.items() if links is None],
-                RED_LINK_TTL_S,
-                status=PageStatus.REDLINK,
+                NOT_FOUND_TTL_S,
+                status=PageStatus.NOTFOUND,
             )
             to_fetch.extend(stale)
 
@@ -164,12 +164,17 @@ class LinkStore:
         return known
 
     def state(self, title: str) -> str:
-        """What is known about a title: article, redlink, or unknown.
+        """What is known about a title: article, notfound, or unknown.
 
         All three are properties of the page itself, so none of them change
-        when some other page does.
+        when some other page does. Whether a link to it is red depends on the
+        pages that link to it, so it is not one of these.
         """
         return STATE[self.status(title)]
+
+    def destination(self, title: str) -> str | None:
+        """What this title redirects to, or None if it does not."""
+        return self._db.destination(title)
 
     def note_failure(self, title: str, reason: str) -> None:
         """Record why a retrieval failed, so a caller can say more than 'unknown'."""
@@ -183,7 +188,7 @@ class LinkStore:
         retrieval rather than one per name the article answers to.
         """
         if page.links is None:
-            self.mark_red_links([page.title])
+            self.mark_not_found([page.title])
             log.info("      no article at: %s", page.title)
         else:
             self.store(page.title, page.links)
@@ -204,14 +209,14 @@ class LinkStore:
         """Drop a title from the store so the next walk retrieves it again."""
         return self._db.forget(title)
 
-    def mark_red_links(self, titles: Iterable[str]) -> None:
-        self._db.mark_red_links(titles)
+    def mark_not_found(self, titles: Iterable[str]) -> None:
+        self._db.mark_not_found(titles)
 
     def link_count(self) -> int:
         return self._db.link_count()
 
-    def red_link_count(self) -> int:
-        return self._db.red_link_count()
+    def not_found_count(self) -> int:
+        return self._db.not_found_count()
 
     def get_meta(self, key: str, default: str | None = None) -> str | None:
         return self._db.get_meta(key, default)

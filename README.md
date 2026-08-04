@@ -8,7 +8,7 @@ Finds the shortest path between two Wikipedia articles by following internal lin
 mkvirtualenv wikiwalker -a "$PWD" -p /opt/local/bin/python3.14
 pip install -e ".[dev]"
 pytest
-pytest -m live   # 35s at 10rps, runs the fetcher links retrieval test vs API results
+pytest -m live   # ~70s at 10rps, compares the fetcher against the API on 30 random articles
 ```
 
 ```bash
@@ -51,6 +51,9 @@ python3 data_cli.py simplewiki  # builds simplewiki.db (~2GB, downloads ~146MB)
 python3 walker.py read-only Bristol Cheese
 python3 walker.py read-only April Nigeria
 python3 walker.py read-only "South West England" "Walton Cardiff"
+
+python3 walker.py read-only -v UK London           # source is a redirect
+python3 walker.py read-only -v Bristol Uk          # target is a redirect
 ```
 
 ### Read-through demo
@@ -73,7 +76,7 @@ since the first one is from a past snapshot.
 
 ### Crawling live Wikipedia
 
-One request per second by default.
+Ten requests per second by default, ten in flight.
 
 ```bash
 python3 data_cli.py empty --wiki wikipedia-us
@@ -98,13 +101,20 @@ the store already holds and the ones still arriving, so the `Walker` iterates it
 synchronously. Reading a page that has not landed blocks until it has, which
 keeps the BFS loop free of any notion of fetching.
 
-A link is in one of three states:
+A page in the store is one of:
 
-| state | meaning |
+| status | meaning |
 |---|---|
-| `article` | an article, so it has links to follow |
-| `redlink` | no article behind the title, so nothing leads out of it |
-| `unknown` | the store has never looked at it |
+| `article` | the title served a page, and its links are in `links` |
+| `redirect` | the title redirects to another, named in `redirect_to` |
+| `notfound` | the title returned 404 |
+
+A title with no row has never been read. `notfound` is a 24h cache of the 404,
+so a crawl does not re-request it on every walk; the dump needs no such state,
+since a complete snapshot proves absence on its own.
+
+A link to a `notfound` title is a red link. red links are just counted during the
+walk, the attribute "red link" is not stored anywhere.
 
 Replace the db with an empty one:
 
@@ -118,29 +128,24 @@ simple.wikipedia.org has been added to facilitate tests (approx. 60 links per pa
 
 ### LinkStore
 
-1. *Read skew*: a walk spans thousands of pages read at different instants, so
-   the graph it traverses may never have existed as a whole. Whether a page is a red link,
-   an orphan or an article is a past observation stored in the walks table.
+1. *Read skew*: a walk spans pages read at different instants, so the graph it traverses
+    may never have existed as a whole.
 2. An article, once stored, is **never refreshed**. The only refresh rule covers
-   red links, re-checked after 24h (`LinkStore.get_links`).
-3. *Red links are eventually consistent*, with a 24h period. Articles are not:
-   once stored they are never re-read, so the store has no mechanism to converge on them.
-   Red links vs transient errors: TBD.
-4. `BatchLinks.drain()` collects the pages of the current batch even if the batch iteration is
+   `notfound`, re-checked after 24h (`LinkStore.get_links`).
+3. `BatchLinks.drain()` collects the pages of the current batch even if the batch iteration is
     stopped. (*TODO impact on large batches*)
 
 
 ### Fetcher
 
-A page has 3 possible states, 'article', 'notfound' (-> 'redlink'), 'failed' or 'redirect'.
-When it's fetched, an article is found.
-When a link points to it and it's notfound, it is changed to redlink (SHOULD WE DO IT?).
-
 Redirect(s) work as on Wikipedia. A -> B returns B and does not count the extra hop.
-If A -> B -> C: B is returned, and so the extra hop is counted.
+If A -> B -> C: B is returned, and so the extra hop is counted. A wiki does not
+HTTP-redirect: it serves the target's HTML under the alias's own URL, so the
+redirect is read from `<link rel="canonical">` rather than from the response.
 
-1. Concurrency of 10 is against Wikipedia's policies and might get you banned,
-   so requests are also paced, 10 rps by default.
+1. Wikimedia publishes no rate for `/wiki/` HTML — robots.txt sets a crawl
+   delay for one named bot and otherwise asks that bots be "low-speed". The
+   default of 10 rps is our choice, not theirs; `--max-rps` lowers it.
 
 2. `429` is a **global pause**, not a per-request retry:
 
@@ -185,16 +190,11 @@ it divergence is <= 0.75% (pytest -m live).
         return iter(self._known)
 
 
-+ test wikipedia walk, con opzioni per rps / concurrency
-
-+ check sequence log
++ topK  article names
 
 + topK  shortest paths
-        article names
 
-Top 5 shortest paths - refers to the first 5 found shortest paths between a source and a target
++ add supporto per multi paths
+    Top 5 shortest paths - refers to the first 5 found shortest paths between a source and a target
 
-
-test mode, reads locally, from the filesystem, not from python memory?
-    is memory regenerated each time?
 

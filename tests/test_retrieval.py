@@ -86,11 +86,11 @@ def test_a_page_already_held_is_not_fetched() -> None:
     assert factory.made["fetcher"].requested == []
 
 
-def test_a_title_with_no_article_becomes_a_red_link() -> None:
+def test_a_title_with_no_article_is_recorded_as_not_found() -> None:
     with LinkStore(":memory:", serving({})) as store:
         assert store.get_links(["Nowhere"]).get("Nowhere") is None
-        assert store.red_link_count() == 1
-        assert store.status("Nowhere") == "redlink"
+        assert store.not_found_count() == 1
+        assert store.status("Nowhere") == "notfound"
 
 
 def test_a_failed_fetch_is_not_recorded_as_anything() -> None:
@@ -101,7 +101,7 @@ def test_a_failed_fetch_is_not_recorded_as_anything() -> None:
 
         assert "A" not in links
         assert store.status("A") is None
-        assert store.red_link_count() == 0
+        assert store.not_found_count() == 0
 
 
 # --------------------------------------------------------------------------

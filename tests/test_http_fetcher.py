@@ -73,7 +73,7 @@ def test_a_404_means_no_article() -> None:
 
 
 def test_a_server_error_is_never_mistaken_for_a_missing_article() -> None:
-    """If this returned None the caller would store a red link, and every walk
+    """If this returned None the caller would record the title as missing, and every walk
     through that page would silently return a longer path."""
     f = fetcher(lambda request: httpx.Response(500), retries=1)
 

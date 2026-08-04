@@ -21,9 +21,9 @@ from settings import SQLITE_PARAM_BATCH as _PARAM_BATCH
 class PageStatus(StrEnum):
     """The only values a `pages` row can carry."""
 
-    ARTICLE = "ok"
-    REDLINK = "redlink"
+    ARTICLE = "article"
     REDIRECT = "redirect"
+    NOTFOUND = "notfound"
 
 
 _STATUS_VALUES = ", ".join(f"'{status}'" for status in PageStatus)
@@ -36,10 +36,13 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
--- A row means the title is known: 'ok' = article, its edges are in `links`;
--- 'redlink' = the title was checked and no article exists; 'redirect' = another
--- title names the same article, which `redirect_to` gives. Never fetched has no
--- row at all, which is what recording red links keeps distinct from a dead end.
+-- A row means the title is known:
+--   'article'   the title served a page, and its links are in `links`
+--   'redirect'  the title redirects to another, named in `redirect_to`
+--   'notfound'  the title returned 404
+-- Never fetched has no row at all, which is what recording a 404 keeps distinct
+-- from a dead end. A link to a 'notfound' title is a red link; that is a fact
+-- about the link, so it lives in `links` rather than here.
 CREATE TABLE IF NOT EXISTS pages (
     title       TEXT PRIMARY KEY,
     fetched_at  REAL NOT NULL,
@@ -166,8 +169,8 @@ class LinkDatabase:
     ) -> list[str]:
         """Return the known titles whose record is older than `max_age_s`.
 
-        `status` narrows the check to one kind: articles and red links get
-        different lifetimes (see `RED_LINK_TTL_S`).
+        `status` narrows the check to one kind: an article and a title that
+        404s get different lifetimes (see `NOT_FOUND_TTL_S`).
         """
         cutoff = time.time() - max_age_s
         stale: list[str] = []
@@ -194,7 +197,7 @@ class LinkDatabase:
         ).fetchone()
         return row[0] if row else None
 
-    def red_links(self, titles: Iterable[str]) -> set[str]:
+    def not_found(self, titles: Iterable[str]) -> set[str]:
         """Return which of `titles` are known to have no article behind them."""
         known: set[str] = set()
 
@@ -205,7 +208,7 @@ class LinkDatabase:
                 for (title,) in self._conn.execute(
                     f"SELECT title FROM pages "
                     f"WHERE status = ? AND title IN ({placeholders})",
-                    [PageStatus.REDLINK, *batch],
+                    [PageStatus.NOTFOUND, *batch],
                 )
             )
 
@@ -221,9 +224,9 @@ class LinkDatabase:
         ).fetchone()
         return PageStatus(row[0]) if row else None
 
-    def red_link_count(self) -> int:
+    def not_found_count(self) -> int:
         return self._conn.execute(
-            "SELECT COUNT(*) FROM pages WHERE status = ?", (PageStatus.REDLINK,)
+            "SELECT COUNT(*) FROM pages WHERE status = ?", (PageStatus.NOTFOUND,)
         ).fetchone()[0]
 
     def store(self, title: str, links: list[str], etag: str | None = None) -> None:
@@ -249,7 +252,7 @@ class LinkDatabase:
         """Record many pages at once. `None` links mean no article exists.
 
         One transaction for the lot, so an interrupted load leaves the store as
-        it was. Returns (articles, red links) written.
+        it was. Returns (articles, missing titles) written.
         """
         now = time.time()
         articles: list[tuple[str, float]] = []
@@ -275,7 +278,7 @@ class LinkDatabase:
             self._conn.executemany(
                 "INSERT OR REPLACE INTO pages (title, fetched_at, etag, status) "
                 "VALUES (?, ?, NULL, ?)",
-                [(title, at, PageStatus.REDLINK) for title, at in dead],
+                [(title, at, PageStatus.NOTFOUND) for title, at in dead],
             )
             self._conn.executemany(
                 "INSERT INTO links (src, dst, ord) VALUES (?, ?, ?)", edges
@@ -289,7 +292,7 @@ class LinkDatabase:
         The joins belong to whoever staged the dump; the column names belong
         here. Kept in one place so the schema stays private to this module.
 
-        Expects `t_page`, `t_pagelinks` and `t_resolved` to exist.
+        Expects `t_page`, `t_pagelinks`, `t_redirect` and `t_target` to exist.
         """
         with self._conn:
             self._conn.executescript(
@@ -297,31 +300,41 @@ class LinkDatabase:
                 DELETE FROM links;
                 DELETE FROM pages;
 
+                -- Edges as the pages write them. A link to a redirect stays a
+                -- link to that title; what it names is the redirect's own row.
                 INSERT INTO links (src, dst, ord)
                 SELECT p.page_title,
-                       r.title,
-                       ROW_NUMBER() OVER (PARTITION BY p.page_title ORDER BY r.title) - 1
+                       t.title,
+                       ROW_NUMBER() OVER (PARTITION BY p.page_title ORDER BY t.title) - 1
                 FROM t_pagelinks e
-                JOIN t_page     p ON p.page_id = e.pl_from
-                                 AND p.page_namespace = '{namespace}'
-                                 AND p.page_is_redirect = '0'
-                JOIN t_resolved r ON r.target_id = e.pl_target_id
+                JOIN t_page   p ON p.page_id = e.pl_from
+                               AND p.page_namespace = '{namespace}'
+                               AND p.page_is_redirect = '0'
+                JOIN t_target t ON t.target_id = e.pl_target_id
                 WHERE e.pl_from_namespace = '{namespace}';
 
-                -- Every non-redirect article, including ones linking nowhere: a
-                -- snapshot is complete by construction, so no links is knowledge.
+                -- Every article, including ones linking nowhere: a snapshot is
+                -- complete by construction, so no links is knowledge.
                 INSERT INTO pages (title, fetched_at, etag, status)
                 SELECT page_title, strftime('%s', 'now'), NULL, '{PageStatus.ARTICLE}'
                 FROM t_page
                 WHERE page_namespace = '{namespace}' AND page_is_redirect = '0';
 
-                -- Titles linked to that have no article. They outnumber articles
-                -- several times over; without them the search cannot tell "no
-                -- such article" from "not looked at yet".
+                INSERT OR REPLACE INTO pages (title, fetched_at, etag, status, redirect_to)
+                SELECT p.page_title, strftime('%s', 'now'), NULL,
+                       '{PageStatus.REDIRECT}', r.rd_title
+                FROM t_page p
+                JOIN t_redirect r ON r.rd_from = p.page_id
+                                 AND r.rd_namespace = '{namespace}'
+                WHERE p.page_namespace = '{namespace}' AND p.page_is_redirect = '1';
+
+                -- Titles linked to that have no page of their own. They
+                -- outnumber articles several times over; without them the
+                -- search cannot tell "no such article" from "not looked at yet".
                 INSERT OR IGNORE INTO pages (title, fetched_at, etag, status)
-                SELECT DISTINCT r.title, strftime('%s', 'now'), NULL, '{PageStatus.REDLINK}'
-                FROM t_resolved r
-                WHERE r.title NOT IN (SELECT title FROM pages);
+                SELECT DISTINCT t.title, strftime('%s', 'now'), NULL, '{PageStatus.NOTFOUND}'
+                FROM t_target t
+                WHERE t.title NOT IN (SELECT title FROM pages);
                 """
             )
 
@@ -349,7 +362,7 @@ class LinkDatabase:
         ).fetchone()
         return row[0] if row else None
 
-    def mark_red_links(self, titles: Iterable[str]) -> None:
+    def mark_not_found(self, titles: Iterable[str]) -> None:
         """Record that these titles have no article behind them (e.g. a 404).
 
         Replaces any existing row and drops its edges: an article can be
@@ -361,14 +374,14 @@ class LinkDatabase:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO pages (title, fetched_at, etag, status) "
                     "VALUES (?, ?, NULL, ?)",
-                    (title, now, PageStatus.REDLINK),
+                    (title, now, PageStatus.NOTFOUND),
                 )
                 self._conn.execute("DELETE FROM links WHERE src = ?", (title,))
 
     def forget(self, title: str) -> tuple[int, int]:
         """Remove a title and its links, returning it to `unknown`.
 
-        Not the same as marking it a red link: that records "no article
+        Not the same as marking it not found: that records "no article
         exists", this records nothing at all, so the next walk fetches it.
         """
         with self._conn:

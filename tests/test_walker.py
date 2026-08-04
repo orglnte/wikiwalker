@@ -71,7 +71,7 @@ def test_the_same_database_always_returns_the_same_path(db: LinkDatabase) -> Non
 # Honesty about what the search could see
 # --------------------------------------------------------------------------
 
-def test_a_red_link_does_not_make_a_search_incomplete(graph: LinkDatabase) -> None:
+def test_a_missing_title_does_not_make_a_search_incomplete(graph: LinkDatabase) -> None:
     """`Nowhere` has no article behind it. Following it was never possible for
     anyone, so the search loses nothing by stopping there and must not report
     the result as doubtful on its account."""
@@ -115,13 +115,13 @@ def test_an_unknown_source_yields_no_path_and_an_incomplete_search(db: LinkDatab
     assert not result.complete
 
 
-def test_red_links_are_not_counted_as_pages_expanded(db: LinkDatabase) -> None:
-    """Expanding is work done on a real page. A red link is neither fetched
+def test_missing_titles_are_not_counted_as_pages_expanded(db: LinkDatabase) -> None:
+    """Expanding is work done on a real page. A missing one is neither fetched
     nor walked, so counting it would overstate what the search covered."""
     db.store("Source", ["Nowhere", "Real"])
     db.store("Real", [])
     db.store("Marooned", [])
-    db.mark_red_links(["Nowhere"])
+    db.mark_not_found(["Nowhere"])
 
     result = Walker(db).find_path("Source", "Marooned")
 
@@ -132,31 +132,31 @@ def test_red_links_are_not_counted_as_pages_expanded(db: LinkDatabase) -> None:
 # Endpoint status — the two ends are not symmetric
 # --------------------------------------------------------------------------
 
-def test_a_red_link_target_is_reachable(db: LinkDatabase) -> None:
-    """The exercise reaches the target when a link equals it. A red link is a
-    perfectly good link target, so the search must not refuse it."""
+def test_a_target_with_no_article_is_reachable(db: LinkDatabase) -> None:
+    """The exercise reaches the target when a link equals it. A title with no
+    article is a perfectly good link target, so the search must not refuse it."""
     db.store("Source", ["Nowhere"])
-    db.mark_red_links(["Nowhere"])
+    db.mark_not_found(["Nowhere"])
 
     result = Walker(db).find_path("Source", "Nowhere")
 
     assert result.path == ["Source", "Nowhere"]
-    assert result.target_status == "redlink"
+    assert result.target_status == "notfound"
 
 
-def test_a_red_link_source_can_reach_nothing(db: LinkDatabase) -> None:
+def test_a_source_with_no_article_can_reach_nothing(db: LinkDatabase) -> None:
     """No article means no outgoing links, so no path can start here.
 
     Note this is not an incomplete search: nothing is absent from the database,
     the page simply does not exist.
     """
     db.store("Somewhere", ["Nowhere"])
-    db.mark_red_links(["Nowhere"])
+    db.mark_not_found(["Nowhere"])
 
     result = Walker(db).find_path("Nowhere", "Somewhere")
 
     assert result.path is None
-    assert result.source_status == "redlink"
+    assert result.source_status == "notfound"
     assert result.unread == set()
     assert result.complete
 
@@ -176,8 +176,8 @@ def test_an_impossible_search_is_settled_without_walking_the_graph(db: LinkDatab
 def test_endpoint_status_is_reported_for_ordinary_articles(graph: LinkDatabase) -> None:
     result = Walker(graph).find_path("Source", "Target")
 
-    assert result.source_status == "ok"
-    assert result.target_status == "ok"
+    assert result.source_status == "article"
+    assert result.target_status == "article"
 
 
 def test_unknown_endpoints_have_no_status(db: LinkDatabase) -> None:
@@ -195,7 +195,7 @@ def test_notes_explain_a_target_with_no_article_without_calling_it_a_failure(
     """And without claiming anything links to it. A 404 says an article is
     missing; only a page that carries the link says somebody points at it."""
     db.store("Source", ["Nowhere"])
-    db.mark_red_links(["Nowhere"])
+    db.mark_not_found(["Nowhere"])
     result = Walker(db).find_path("Source", "Nowhere")
 
     notes = endpoint_notes(result, "Source", "Nowhere", "simple.wikipedia.org")

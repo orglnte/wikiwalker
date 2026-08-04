@@ -253,19 +253,13 @@ def build(db_path: str, *, keep_staging: bool = False) -> None:
     print("Resolving redirects...")
     conn.executescript(
         f"""
-        DROP TABLE IF EXISTS t_resolved;
-        CREATE TABLE t_resolved AS
-        SELECT lt.lt_id AS target_id,
-               COALESCE(r.rd_title, lt.lt_title) AS title
+        DROP TABLE IF EXISTS t_target;
+        CREATE TABLE t_target AS
+        SELECT lt.lt_id AS target_id, lt.lt_title AS title
         FROM t_linktarget lt
-        LEFT JOIN t_page     p ON p.page_title = lt.lt_title
-                              AND p.page_namespace = '{MAIN_NAMESPACE}'
-                              AND p.page_is_redirect = '1'
-        LEFT JOIN t_redirect r ON r.rd_from = p.page_id
-                              AND r.rd_namespace = '{MAIN_NAMESPACE}'
         WHERE lt.lt_namespace = '{MAIN_NAMESPACE}';
 
-        CREATE INDEX ix_resolved ON t_resolved(target_id);
+        CREATE INDEX ix_target ON t_target(target_id);
         """
     )
 
@@ -276,20 +270,24 @@ def build(db_path: str, *, keep_staging: bool = False) -> None:
 
     counted = "SELECT COUNT(*) FROM pages WHERE status = ?"
     pages = conn.execute(counted, (PageStatus.ARTICLE,)).fetchone()[0]
-    reds = conn.execute(counted, (PageStatus.REDLINK,)).fetchone()[0]
-    edges = conn.execute("SELECT COUNT(*) FROM links").fetchone()[0]
+    missing = conn.execute(counted, (PageStatus.NOTFOUND,)).fetchone()[0]
+    redirects = conn.execute(counted, (PageStatus.REDIRECT,)).fetchone()[0]
+    links = conn.execute("SELECT COUNT(*) FROM links").fetchone()[0]
 
     if keep_staging:
         print("Keeping staging tables (--keep-staging)")
     else:
         print("Dropping staging tables...")
-        for table in (*DUMP_TABLES, "resolved"):
+        for table in (*DUMP_TABLES, "target"):
             conn.execute(f"DROP TABLE IF EXISTS t_{table}")
         conn.commit()
         conn.execute("VACUUM")
 
     conn.close()
-    print(f"\n{pages:,} articles, {reds:,} red links, {edges:,} edges")
+    print(
+        f"\n{pages:,} articles, {redirects:,} redirects, "
+        f"{missing:,} not found, {links:,} links"
+    )
 
 
 def load_dump(wiki: str, work: Path, dump_dir: Path, *, keep_staging: bool) -> None:
@@ -364,10 +362,13 @@ def main() -> None:
     else:
         load_dump(args.mode, work, Path(args.dumps), keep_staging=args.keep_staging)
 
-    # A write-ahead log belongs to the database file it was written for. One
-    # left by an interrupted run would be replayed into the new file, which
-    # SQLite reports as a malformed image.
-    for stale in (Path(f"{target}-wal"), Path(f"{target}-shm")):
+    # A write-ahead log belongs to the database file it was written for. The
+    # target's would be replayed into the new file, which SQLite reports as a
+    # malformed image; the scratch file's would outlive the file it names.
+    for stale in (
+        Path(f"{target}-wal"), Path(f"{target}-shm"),
+        Path(f"{work}-wal"), Path(f"{work}-shm"),
+    ):
         stale.unlink(missing_ok=True)
 
     # Atomic on POSIX: no moment where the target is half-written.

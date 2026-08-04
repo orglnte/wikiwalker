@@ -47,5 +47,5 @@ def graph(db: LinkStore) -> LinkStore:
     db.store("Target", [])
     db.store("Barren", [])
     db.store("Isolated", [])
-    db.mark_red_links(["Nowhere"])
+    db.mark_not_found(["Nowhere"])
     return db

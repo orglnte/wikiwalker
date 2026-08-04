@@ -65,9 +65,9 @@ MODES = {
 
 
 STATE_MEANING = {
-    "article": "an article, so it has links to follow",
-    "redlink": "no article behind the title, so nothing leads out of it",
-    "unknown": "the store has never looked at it",
+    "article": "so it has links to follow",
+    "notfound": "so nothing leads out of it",
+    "unknown": "the store has never read it",
 }
 
 
@@ -89,8 +89,8 @@ class WalkResult:
     # What the store knew about the target when the walk started.
     target_state: str | None = None
 
-    # 'ok', 'redlink', or None (unknown). "No path" reads differently when the
-    # source has no article behind it.
+    # 'ok', 'notfound', or None (unknown). "No path" reads differently when
+    # the source has no article behind it.
     source_status: str | None = None
     target_status: str | None = None
 
@@ -127,10 +127,10 @@ class Walker:
                 pair fails visibly instead of looking like a hang.
 
         The ends are not symmetric: the source needs outgoing links, so it must
-        be an article. The target only needs to be linked to, so a red link is
-        reachable.
+        be an article. The target only needs to be linked to, so a title with no
+        article behind it is still reachable.
         """
-        log.info("check endpoints: %s, %s (source must be an article)", source, target)
+        log.info("check endpoints: %s, %s", source, target)
         source_status = self._store.status(source)
         target_status = self._store.status(target)
         store_failures = getattr(self._store, "failures", {})
@@ -140,10 +140,19 @@ class Walker:
         states = {}
         for title in (source, target):
             states[title] = self._store.state(title)
+            names = self._store.destination(title)
+
+            if names:
+                # The walk sees what it names, but the title itself is not that.
+                log.info(
+                    "    %s is redirect to %s, which is %s", title, names, states[title]
+                )
+                continue
+
             # A read that failed is not the same as one never attempted, and
             # `unknown` covers both.
             why = endpoint_failures.get(title) or STATE_MEANING[states[title]]
-            log.info("    %s is %s (%s)", title, states[title], why)
+            log.info("    %s is %s, %s", title, states[title], why)
 
         if source == target and source_status is not None:
             return WalkResult(
@@ -155,7 +164,7 @@ class Walker:
         # Checked before searching: a source with no article has nothing to
         # follow, and a title nothing links to can never be discovered. Proving
         # either by search costs a full sweep of the graph.
-        if source_status != "ok" or target_status is None:
+        if source_status != "article" or target_status is None:
             unknown = {t for t, s in ((source, source_status), (target, target_status))
                        if s is None}
             return WalkResult(
@@ -216,7 +225,7 @@ class Walker:
                     depth, batch_number, len(batch), self._batch_size,
                 )
                 links = self._store.get_links(batch)
-                in_batch = {"expanded": 0, "dead": 0, "unread": 0}
+                in_batch = {"expanded": 0, "red_links": 0, "unread": 0}
 
                 for page in batch:
                     # Check if we are over the max pages budget
@@ -239,11 +248,10 @@ class Walker:
                         in_batch["unread"] += 1
                         continue
 
-                    # TODO is this red links?
                     if outgoing_links is None:
-                        # No article behind the title. A real dead end, and it
-                        # costs the answer nothing.
-                        in_batch["dead"] += 1
+                        # A red link: some page linked here and the title 404s.
+                        # Skipping it.
+                        in_batch["red_links"] += 1
                         continue
 
                     expanded += 1
@@ -282,10 +290,11 @@ class Walker:
                             page, len(outgoing_links), discovered,
                         )
 
-                if in_batch["dead"] or in_batch["unread"]:
+                if in_batch["red_links"] or in_batch["unread"]:
                     log.info(
-                        "    %d expanded, %d dead end(s), %d unread",
-                        in_batch["expanded"], in_batch["dead"], in_batch["unread"],
+                        "    %d expanded, %d red link(s) (link pointing to a "
+                        "notfound page), %d unread",
+                        in_batch["expanded"], in_batch["red_links"], in_batch["unread"],
                     )
 
             if not next_frontier:
@@ -359,7 +368,7 @@ def endpoint_notes(result: WalkResult, source: str, target: str, site: str) -> l
             f"{wikifetcher.to_name(source)} could not be read"
             + (f" ({why})." if why else ".")
         )
-    elif result.source_status == "redlink":
+    elif result.source_status == "notfound":
         notes.append(
             f"{wikifetcher.to_name(source)} has no article on {site}, so there is nothing "
             f"to link out from and no path can start here."
@@ -373,7 +382,7 @@ def endpoint_notes(result: WalkResult, source: str, target: str, site: str) -> l
             + " It may well have no article behind it, which is a target the"
             " walk accepts — pages can link to a title nobody has written."
         )
-    elif result.target_status == "redlink":
+    elif result.target_status == "notfound":
         # Not an error: a title with no article behind it is still a link target.
         notes.append(
             f"{wikifetcher.to_name(target)} has no article on {site}. Nothing leads out of "
@@ -398,8 +407,7 @@ def warn_if_gil_reenabled() -> None:
     print(
         "WARNING: the GIL was re-enabled at runtime — an imported C extension "
         "has not declared free-threading support, so fetching and parsing ran "
-        "serialised. Re-run with -W error::RuntimeWarning to find which.",
-        file=sys.stderr,
+        "serialised. Re-run with -W error::RuntimeWarning to find which."
     )
 
 
@@ -455,8 +463,16 @@ def main() -> None:
     args = build_parser().parse_args()
     mode = MODES[args.mode]
 
+    # Everything a run has to say goes to stdout, so one pipe carries all of it.
+    # Errors stay on stderr, where a caller can still separate them out.
     level = logging.DEBUG if args.verbose else logging.WARNING
-    logging.basicConfig(level=level, format="%(name)-19s %(message)s", stream=sys.stderr)
+    narration = logging.StreamHandler(sys.stdout)
+    narration.addFilter(lambda record: record.levelno < logging.ERROR)
+    problems = logging.StreamHandler(sys.stderr)
+    problems.setLevel(logging.ERROR)
+    logging.basicConfig(
+        level=level, format="%(name)-19s %(message)s", handlers=[narration, problems]
+    )
     for noisy in ("asyncio", "httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
@@ -504,7 +520,7 @@ def main() -> None:
 
     if result.found:
         print_path(result.path, site)
-    elif result.source_status != "ok" or result.target_status is None:
+    elif result.source_status != "article" or result.target_status is None:
         print(f"\nNo path from {wikifetcher.to_name(source)} to {wikifetcher.to_name(target)}.")
     else:
         print(f"\nNo path found within {result.depth_reached} links.")
@@ -512,12 +528,9 @@ def main() -> None:
     for note in notes:
         print(f"\nNOTE: {note}")
 
-    # Diagnostics go to stderr; flush first so the two streams stay in order.
-    sys.stdout.flush()
     print(
         f"\n{result.pages_expanded:,} pages expanded in {result.elapsed_s:.2f}s"
-        f" | depth {result.depth_reached}",
-        file=sys.stderr,
+        f" | depth {result.depth_reached}"
     )
 
     if not result.complete:
@@ -535,7 +548,7 @@ def main() -> None:
             if result.found
             else "a path may exist beyond what was searched"
         )
-        print(f"WARNING: search was not exhaustive ({cause}) — {caveat}.", file=sys.stderr)
+        print(f"WARNING: search was not exhaustive ({cause}) — {caveat}.")
 
     if budget_spent:
         # Says which limit ended the crawl. Without it an exhausted budget looks
@@ -543,8 +556,7 @@ def main() -> None:
         print(
             f"NOTE: the fetch budget of {fetched:,} page(s) was exhausted."
             " Raise --max-fetched-pages to search further; what was fetched is kept,"
-            " so the next run carries on from it.",
-            file=sys.stderr,
+            " so the next run carries on from it."
         )
 
     warn_if_gil_reenabled()
@@ -557,5 +569,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         # Every page the crawl read is already written, so the next run resumes
         # from it. 130 is what a shell expects from a process killed by SIGINT.
-        print("\nInterrupted. Pages already fetched are kept.", file=sys.stderr)
+        print("\nInterrupted. Pages already fetched are kept.")
         sys.exit(130)

@@ -81,9 +81,9 @@ FETCH_TIMEOUT_S = 5.0
 # Storage
 # --------------------------------------------------------------------------
 
-# A red link becomes an article only when somebody writes one, so re-checking
-# one every run buys nothing.
-RED_LINK_TTL_S = 24 * 60 * 60
+# A title that 404s becomes an article only when somebody writes one, so
+# re-checking every run buys nothing.
+NOT_FOUND_TTL_S = 24 * 60 * 60
 
 # SQLite's host-parameter cap per statement is 999 on older builds. Every
 # IN (...) query batches below it.

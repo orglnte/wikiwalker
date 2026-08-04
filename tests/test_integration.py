@@ -35,16 +35,16 @@ def test_the_database_records_which_wiki_it_holds(wiki: LinkStore) -> None:
     assert wiki.get_meta("site") in {"simple.wikipedia.org", "en.wikipedia.org"}
 
 
-def test_the_load_produced_articles_links_and_red_links(wiki: LinkStore) -> None:
+def test_the_load_produced_articles_links_and_missing_titles(wiki: LinkStore) -> None:
     assert wiki.page_count() > 100_000
     assert wiki.link_count() > 1_000_000
-    assert wiki.red_link_count() > 0, (
+    assert wiki.not_found_count() > 0, (
         "no red links recorded — every link target resolved to an article, "
         "which does not happen on a real wiki and points at the ETL"
     )
 
 
-def test_every_link_target_is_either_an_article_or_a_red_link(wiki: LinkStore) -> None:
+def test_every_link_target_is_either_an_article_a_redirect_or_missing(wiki: LinkStore) -> None:
     """A target that is neither is a hole, and a search crossing one can no
     longer claim its answer is the shortest."""
     sample = random.Random(0).sample(sorted(wiki.get_links(_some_titles(wiki))), 50)
@@ -79,6 +79,6 @@ def _some_titles(wiki: LinkStore) -> list[str]:
     return [
         title
         for (title,) in wiki._db._conn.execute(
-            "SELECT title FROM pages WHERE status = 'ok' LIMIT 200"
+            "SELECT title FROM pages WHERE status = 'article' LIMIT 200"
         )
     ]
