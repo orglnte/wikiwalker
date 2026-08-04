@@ -121,32 +121,32 @@ class LinkDatabase:
 
         for batch in _batches(wanted, _PARAM_BATCH):
             placeholders = ",".join("?" * len(batch))
-            for title, type, destination in self._conn.execute(
+            for title, page_type, destination in self._conn.execute(
                 f"SELECT title, type, redirect_to FROM pages WHERE title IN ({placeholders})",
                 batch,
             ):
-                if type == PageType.REDIRECT and destination:
+                if page_type == PageType.REDIRECT and destination:
                     answers[title] = destination
                     continue
 
                 answers[title] = title
                 # From `pages` first, so an article with no links still gets an
                 # entry; `links` alone would omit it.
-                found[title] = [] if type == PageType.ARTICLE else None
+                found[title] = [] if page_type == PageType.ARTICLE else None
 
         # What a redirect names may not have been asked for, and may not be held
         # at all — in which case the redirect reads as absent, like it. Landing
         # on a second redirect spends the hop: its page is the one link it holds.
         for batch in _batches(sorted(set(answers.values()) - set(found)), _PARAM_BATCH):
             placeholders = ",".join("?" * len(batch))
-            for title, type, destination in self._conn.execute(
+            for title, page_type, destination in self._conn.execute(
                 f"SELECT title, type, redirect_to FROM pages WHERE title IN ({placeholders})",
                 batch,
             ):
-                if type == PageType.REDIRECT:
+                if page_type == PageType.REDIRECT:
                     found[title] = [destination] if destination else []
                 else:
-                    found[title] = [] if type == PageType.ARTICLE else None
+                    found[title] = [] if page_type == PageType.ARTICLE else None
 
         for batch in _batches(sorted(found), _PARAM_BATCH):
             placeholders = ",".join("?" * len(batch))
@@ -165,7 +165,7 @@ class LinkDatabase:
         }
 
     def stale_titles(
-        self, titles: Iterable[str], max_age_s: float, *, type: PageType | None = None
+        self, titles: Iterable[str], max_age_s: float, *, page_type: PageType | None = None
     ) -> list[str]:
         """Return the known titles whose record is older than `max_age_s`.
 
@@ -175,8 +175,8 @@ class LinkDatabase:
         cutoff = time.time() - max_age_s
         stale: list[str] = []
 
-        clause = " AND type = ?" if type else ""
-        extra = [type] if type else []
+        clause = " AND type = ?" if page_type else ""
+        extra = [page_type] if page_type else []
 
         for batch in _batches(list(titles), _PARAM_BATCH):
             placeholders = ",".join("?" * len(batch))

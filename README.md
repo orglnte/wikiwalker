@@ -107,7 +107,7 @@ writes.
 
 A page in the store is one of:
 
-| status | meaning |
+| type | meaning |
 |---|---|
 | `article` | the title served a page, and its links are in `links` |
 | `redirect` | the title redirects to another, named in `redirect_to` |

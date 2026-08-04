@@ -173,14 +173,14 @@ def test_an_impossible_search_is_settled_without_walking_the_graph(db: LinkDatab
     assert result.pages_expanded == 0
 
 
-def test_endpoint_status_is_reported_for_ordinary_articles(graph: LinkDatabase) -> None:
+def test_endpoint_type_is_reported_for_ordinary_articles(graph: LinkDatabase) -> None:
     result = Walker(graph).find_path("Source", "Target")
 
     assert result.source_type == "article"
     assert result.target_type == "article"
 
 
-def test_unknown_endpoints_have_no_status(db: LinkDatabase) -> None:
+def test_unknown_endpoints_have_no_type(db: LinkDatabase) -> None:
     db.store("Real", [])
 
     result = Walker(db).find_path("Ghost", "Phantom")

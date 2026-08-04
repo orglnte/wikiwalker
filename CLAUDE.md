@@ -54,23 +54,23 @@ real parser, so equality is an assertion about `html_links.py`.
 namespaces and HTML live there. `Walker` and `link_store` treat titles as
 opaque names. The CLIs are composition roots and may import anything.
 
-**Three states, no more.** `article` (`status='ok'`), `redlink`
-(`status='redlink'`), `unknown` (no row). All three are properties of the page
-itself, so none change when some other page does. Anything derived from *other*
-pages — orphan, reachable — is a past observation, not a stored fact.
+**Three page types, no more.** `article`, `redirect`, `notfound` — plus no row
+at all, which is a title never read. Each is a property of the page itself, so
+none changes when some other page does. Anything derived from *other* pages — a
+red link, an orphan, reachability — is not a stored fact.
 
-**Red link is not the same as unread.** No article is a dead end that costs the
-answer nothing; a page the store could not read is a hole that makes the result
-non-exhaustive. `WalkResult.complete` carries the distinction — `found` says
-whether there is a path, `complete` says whether to trust it as shortest.
+**A 404 is not the same as a failed read.** `notfound` is a dead end that costs
+the answer nothing; a page the store could not read is a hole that makes the
+result non-exhaustive. `WalkResult.complete` carries the distinction — `found`
+says whether there is a path, `complete` says whether to trust it as shortest.
 
 **404 is an answer; anything else is a failure.** Confusing them stores a live
-article as a red link, trusted as a dead end for 24h, and every walk through it
+article as `notfound`, trusted as a dead end for 24h, and every walk through it
 returns a longer path with `complete` still true. Wrong answer, no warning.
 
 **The two ends of a search are not symmetric.** A source needs outgoing links so
-it must be a real article; a target only needs to be linked to, so a red link is
-reachable and is reported, not refused.
+it must be a real article; a target only needs to be linked to, so a `notfound`
+title is reachable and is reported, not refused.
 
 **`Fetcher` takes one title, not a batch.** A coroutine covering ten pages can
 only resolve when the last lands, which defeats per-page blocking. `LinkFetcher`

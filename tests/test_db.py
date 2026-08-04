@@ -57,17 +57,17 @@ def test_not_found_does_not_report_ordinary_articles(sql: LinkDatabase) -> None:
     assert sql.not_found(["Real"]) == set()
 
 
-def test_a_row_cannot_carry_a_status_outside_the_two(sql: LinkDatabase) -> None:
+def test_a_row_cannot_carry_a_type_outside_the_three(sql: LinkDatabase) -> None:
     """`unknown` is the absence of a row, so it must not be storable as one."""
-    for type in ("unknown", "hello there"):
+    for bad in ("unknown", "hello there"):
         with pytest.raises(sqlite3.IntegrityError):
             sql._conn.execute(
                 "INSERT INTO pages (title, fetched_at, type) VALUES (?, ?, ?)",
-                ("Somewhere", 0.0, type),
+                ("Somewhere", 0.0, bad),
             )
 
 
-def test_status_reports_all_three_kinds(sql: LinkDatabase) -> None:
+def test_page_type_reports_all_three_kinds(sql: LinkDatabase) -> None:
     sql.store("Barren", [])
     sql.mark_not_found(["Nowhere"])
 
@@ -272,7 +272,7 @@ def test_staleness_can_be_narrowed_to_missing_titles(sql: LinkDatabase) -> None:
     sql.store("Article", [])
     sql.mark_not_found(["Nowhere"])
 
-    stale = sql.stale_titles(["Article", "Nowhere"], max_age_s=-1, type="notfound")
+    stale = sql.stale_titles(["Article", "Nowhere"], max_age_s=-1, page_type="notfound")
 
     assert stale == ["Nowhere"]
 

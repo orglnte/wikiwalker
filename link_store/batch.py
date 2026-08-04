@@ -72,7 +72,7 @@ class BatchLinks:
         to_fetch += db.stale_titles(
             [t for t, links in self._held.items() if links is None],
             NOT_FOUND_TTL_S,
-            type=PageType.NOTFOUND,
+            page_type=PageType.NOTFOUND,
         )
 
         # Whatever the allowance will not cover stays unfetched, which reads as
