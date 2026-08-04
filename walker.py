@@ -21,11 +21,13 @@ import sysconfig
 import time
 from dataclasses import dataclass, field
 
+import logctx
 import wikifetcher
 from link_store import UNKNOWN, LinkStore
 from settings import (
-    CRAWL_PAGE_BUDGET,
+    CRAWL_FETCH_BUDGET,
     MAX_CONCURRENCY,
+    MAX_CONSECUTIVE_FAILURES,
     MIN_REQUEST_INTERVAL_S,
     WALK_BATCH_SIZE,
 )
@@ -39,27 +41,34 @@ class Mode:
 
     store: str
     fetcher: type[wikifetcher.Fetcher] | None
-    page_budget: int | None
+    fetch_budget: int | None
     summary: str
 
 
 MODES = {
     "read-only": Mode(
-        "simplewiki", None, page_budget=None,
+        "simplewiki", None, fetch_budget=None,
         summary="read-only, never fetches (for testing)",
     ),
     "test": Mode(
-        "test", wikifetcher.LocalFetcher, page_budget=None,
+        "test", wikifetcher.LocalFetcher, fetch_budget=None,
         summary="synthetic 41-page wiki, no network (for testing)",
     ),
     "crawl": Mode(
         "wikipedia-us", wikifetcher.HttpFetcher,
-        page_budget=CRAWL_PAGE_BUDGET,
-        summary=f"fetches what is missing over HTTP, at most {CRAWL_PAGE_BUDGET} pages",
+        fetch_budget=CRAWL_FETCH_BUDGET,
+        summary=f"fetches what is missing over HTTP, at most {CRAWL_FETCH_BUDGET} pages",
     ),
 }
 
 
+
+
+STATE_MEANING = {
+    "article": "an article, so it has links to follow",
+    "redlink": "no article behind the title, so nothing leads out of it",
+    "unknown": "the store has never looked at it",
+}
 
 
 @dataclass
@@ -76,6 +85,9 @@ class WalkResult:
     complete: bool
     elapsed_s: float = 0.0
     unread: set[str] = field(default_factory=set)
+
+    # What the store knew about the target when the walk started.
+    target_state: str | None = None
 
     # 'ok', 'redlink', or None (unknown). "No path" reads differently when the
     # source has no article behind it.
@@ -100,7 +112,7 @@ class Walker:
         target: str,
         *,
         max_depth: int = 10,
-        max_pages: int | None = None,
+        max_walked: int | None = None,
     ) -> WalkResult:
         """Find the shortest path of article links from `source` to `target`.
 
@@ -108,23 +120,27 @@ class Walker:
             max_depth: give up beyond this many hops. A guardrail, not a workable
                 depth — with a branching factor in the hundreds, depth 3 already
                 covers much of the encyclopedia.
-            max_pages: give up after expanding this many pages, so a hopeless
+            max_walked: give up after expanding this many pages, so a hopeless
                 pair fails visibly instead of looking like a hang.
 
         The ends are not symmetric: the source needs outgoing links, so it must
         be an article. The target only needs to be linked to, so a red link is
         reachable.
         """
-        log.info("check endpoints: %s, %s", source, target)
+        log.info("check endpoints: %s, %s "
+         "(source must be an article, target must be known)", source, target)
         source_status = self._store.status(source)
         target_status = self._store.status(target)
-        log.info("  %s is %s, %s is %s", source, source_status or "unknown",
-                 target, target_status or "unknown")
+        states = {}
+        for title in (source, target):
+            states[title] = self._store.state(title)
+            log.info("    %s is %s (%s)", title, states[title], STATE_MEANING[states[title]])
 
         if source == target and source_status is not None:
             return WalkResult(
                 [source], 0, 0, True,
                 source_status=source_status, target_status=target_status,
+                target_state=states[target],
             )
 
         # Checked before searching: a source with no article has nothing to
@@ -136,11 +152,13 @@ class Walker:
             return WalkResult(
                 None, 0, 0, not unknown, unread=unknown,
                 source_status=source_status, target_status=target_status,
+                target_state=states[target],
             )
 
-        result = self._search(source, target, max_depth=max_depth, max_pages=max_pages)
+        result = self._search(source, target, max_depth=max_depth, max_walked=max_walked)
         result.source_status = source_status
         result.target_status = target_status
+        result.target_state = states[target]
         return result
 
     def _search(
@@ -149,7 +167,7 @@ class Walker:
         target: str,
         *,
         max_depth: int,
-        max_pages: int | None,
+        max_walked: int | None,
     ) -> WalkResult:
         """The breadth-first search itself. Titles are already canonical."""
         started = time.monotonic()
@@ -169,7 +187,6 @@ class Walker:
         # boundary between explored and not yet explored
         frontier = [source]
         expanded = 0
-        batch_number = 0
         trace = log.isEnabledFor(logging.DEBUG)
 
         log.info("walk %s -> %s (max depth %d)", source, target, max_depth)
@@ -177,19 +194,24 @@ class Walker:
         for depth in range(max_depth):
             # All links at this frontier add to the next one
             next_frontier: list[str] = []
-            log.info("depth %d: frontier %d page(s)", depth, len(frontier))
+            batch_number = 0
+            logctx.depth.set(depth)
 
             # batched walk
             for start in range(0, len(frontier), self._batch_size):
                 batch = frontier[start : start + self._batch_size]
-                links = self._store.get_links(batch)
                 batch_number += 1
+                log.info(
+                    "  depth %d batch %d links %d (max links %d)",
+                    depth, batch_number, len(batch), self._batch_size,
+                )
+                links = self._store.get_links(batch)
                 in_batch = {"expanded": 0, "dead": 0, "unread": 0}
 
                 for page in batch:
                     # Check if we are over the max pages budget
-                    if max_pages is not None and expanded >= max_pages:
-                        log.info("  stopping: page budget %d reached", max_pages)
+                    if max_walked is not None and expanded >= max_walked:
+                        log.info("    stopping: page budget %d reached", max_walked)
                         return WalkResult(
                             None, depth, expanded, False,
                             time.monotonic() - started, unread,
@@ -227,7 +249,7 @@ class Walker:
 
                         # NOTE its found!
                         if link == target:
-                            log.info("  %s links to %s — found", page, target)
+                            log.info("    %s links to %s — found", page, target)
                             return WalkResult(
                                 # NOTE reverts the path so it's source -> target
                                 _reconstruct(parent, target),
@@ -242,19 +264,19 @@ class Walker:
 
                     if trace:
                         log.debug(
-                            "    expand %s: %d link(s), %d new",
+                            "      expand %s: %d link(s), %d new",
                             page, len(outgoing_links), discovered,
                         )
 
-                log.info(
-                    "  batch %d (size %d): %d expanded, %d dead end(s), %d unread",
-                    batch_number, len(batch),
-                    in_batch["expanded"], in_batch["dead"], in_batch["unread"],
-                )
+                if in_batch["dead"] or in_batch["unread"]:
+                    log.info(
+                        "    %d expanded, %d dead end(s), %d unread",
+                        in_batch["expanded"], in_batch["dead"], in_batch["unread"],
+                    )
 
             if not next_frontier:
                 # Nothing new to explore: the target is unreachable from the source.
-                log.info("nothing new at depth %d: %s is unreachable", depth, target)
+                log.info("  nothing new at depth %d: %s is unreachable", depth, target)
                 return WalkResult(
                     None, depth, expanded, not unread,
                     time.monotonic() - started, unread,
@@ -356,8 +378,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="link store to use (default: picked by the scenario)")
     common.add_argument("--max-depth", type=int, default=10,
                         help="maximum path length in links (default: 10)")
-    common.add_argument("--max-pages", type=int, default=None,
-                        help="stop after expanding this many pages")
+    common.add_argument("--max-walked-pages", type=int, default=None,
+                        help="stop after walking this many pages")
     common.add_argument("-v", "--verbose", action="store_true",
                         help="log every page expanded, fetched and stored")
 
@@ -379,6 +401,12 @@ def build_parser() -> argparse.ArgumentParser:
                              help="pages read or fetched per round "
                                   f"(default: {WALK_BATCH_SIZE})")
         if mode.fetcher is wikifetcher.HttpFetcher:
+            sub.add_argument("--max-fetched-pages", type=int, default=mode.fetch_budget,
+                             help="stop retrieving after this many pages "
+                                  f"(default: {mode.fetch_budget})")
+            sub.add_argument("--walk-anyway", action="store_true",
+                             help="keep walking after the site stops answering, "
+                                  "using only what the store already holds")
             sub.add_argument("--max-concurrency", type=int, default=MAX_CONCURRENCY,
                              help=f"requests in flight at once (default: {MAX_CONCURRENCY})")
             sub.add_argument("--max-rps", type=float,
@@ -403,16 +431,22 @@ def main() -> None:
     source, target = wikifetcher.canonical(args.source), wikifetcher.canonical(args.target)
 
     store_name = args.db or mode.store
-    max_pages = args.max_pages if args.max_pages is not None else mode.page_budget
+    max_fetched = getattr(args, "max_fetched_pages", None)
 
     fetcher = mode.fetcher
     if fetcher is wikifetcher.HttpFetcher:
         interval = 1.0 / args.max_rps if args.max_rps > 0 else 0.0
-        fetcher = functools.partial(wikifetcher.HttpFetcher, min_interval_s=interval)
+        fetcher = functools.partial(
+            wikifetcher.HttpFetcher,
+            min_interval_s=interval,
+            failure_limit=None if args.walk_anyway else MAX_CONSECUTIVE_FAILURES,
+        )
 
     concurrency = getattr(args, "max_concurrency", MAX_CONCURRENCY)
 
-    with LinkStore(store_name, fetcher, concurrency=concurrency) as store:
+    with LinkStore(
+        store_name, fetcher, concurrency=concurrency, max_fetched=max_fetched
+    ) as store:
         if fetcher is None and store.page_count() == 0:
             sys.exit(
                 f"{store_name} is empty — populate it first:\n"
@@ -427,7 +461,7 @@ def main() -> None:
         result = Walker(store, batch_size=batch_size).find_path(
             source, target,
             max_depth=args.max_depth,
-            max_pages=max_pages,
+            max_walked=args.max_walked_pages,
         )
 
     notes = endpoint_notes(result, source, target, site)
@@ -435,9 +469,9 @@ def main() -> None:
     if result.found:
         print_path(result.path, site)
     elif result.source_status != "ok" or result.target_status is None:
-        print(f"No path from {wikifetcher.to_name(source)} to {wikifetcher.to_name(target)}.")
+        print(f"\nNo path from {wikifetcher.to_name(source)} to {wikifetcher.to_name(target)}.")
     else:
-        print(f"No path found within {result.depth_reached} links.")
+        print(f"\nNo path found within {result.depth_reached} links.")
 
     for note in notes:
         print(f"\nNOTE: {note}")

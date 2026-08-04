@@ -47,7 +47,7 @@ class LinkFetcher:
         or raises when the page could not be read.
         """
         wanted = list(titles)
-        log.info("  fetch %d page(s), at most %d at once", len(wanted), self._concurrency)
+        log.info("      fetch %d page(s), at most %d at once", len(wanted), self._concurrency)
         return {
             title: asyncio.run_coroutine_threadsafe(self._fetch(title), self._loop)
             for title in wanted

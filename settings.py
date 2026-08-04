@@ -50,13 +50,20 @@ HTTP_BACKOFF_S = 1.0
 # us to stop, and retrying it is not backing off, it is knocking again.
 RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
 
+# One page failing is that page's problem; this many in a row is the site's.
+MAX_CONSECUTIVE_FAILURES = 10
+
+# A 429 carries Retry-After, which is a resume time rather than a refusal, so
+# it is honoured. Being told to wait this many times means we are unwelcome.
+MAX_RATE_LIMIT_PAUSES = 3
+
 # --------------------------------------------------------------------------
 # Searching
 # --------------------------------------------------------------------------
 
 # A crawl with no budget walks the encyclopedia one request at a time. At the
 # interval above that is hours, so a crawl gets a ceiling unless one is given.
-CRAWL_PAGE_BUDGET = 500
+CRAWL_FETCH_BUDGET = 500
 
 # How many pages' links to hold at once. A BFS level can reach hundreds of
 # thousands of pages; all their links together is gigabytes.

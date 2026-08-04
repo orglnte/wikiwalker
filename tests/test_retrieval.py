@@ -174,12 +174,74 @@ def test_a_page_that_cannot_be_read_makes_the_walk_non_exhaustive() -> None:
 
 
 @pytest.mark.parametrize("budget", [1, 2])
-def test_a_page_budget_stops_a_crawl(budget: int) -> None:
+def test_a_walk_budget_stops_the_search(budget: int) -> None:
     pages = {f"P{i}": [f"P{i + 1}"] for i in range(20)}
 
     with LinkStore(":memory:", serving(pages)) as store:
-        result = Walker(store, batch_size=1).find_path("P0", "P19", max_pages=budget)
+        result = Walker(store, batch_size=1).find_path("P0", "P19", max_walked=budget)
 
     assert result.path is None
     assert not result.complete
     assert result.pages_expanded <= budget
+
+
+@pytest.mark.parametrize("budget", [1, 3])
+def test_a_fetch_budget_stops_retrieval(budget: int) -> None:
+    """The walk carries on over what is held; the rest is unread, so the
+    result reports itself as non-exhaustive rather than as a dead end."""
+    pages = {f"P{i}": [f"P{i + 1}"] for i in range(20)}
+    factory = serving(pages)
+
+    with LinkStore(":memory:", factory, max_fetched=budget) as store:
+        result = Walker(store, batch_size=100).find_path("P0", "P19")
+
+    assert len(factory.made["fetcher"].requested) <= budget
+    assert not result.complete
+
+
+def test_a_fetch_budget_does_not_bound_walking() -> None:
+    """Pages already held cost nothing to walk, so they stay walkable after
+    the budget is spent."""
+    factory = serving({})
+    with LinkStore(":memory:", factory, max_fetched=0) as store:
+        store.store("A", ["B"])
+        store.store("B", [])
+
+        result = Walker(store).find_path("A", "B")
+
+    assert result.path == ["A", "B"]
+    assert factory.made["fetcher"].requested == []
+
+
+# --------------------------------------------------------------------------
+# Forgetting
+# --------------------------------------------------------------------------
+
+def test_a_forgotten_page_is_retrieved_again() -> None:
+    """What makes the read-through visible: the same walk answers from the
+    store, then from the fetcher once the page is dropped."""
+    factory = serving({"A": ["B"], "B": []})
+
+    with LinkStore(":memory:", factory) as store:
+        store.bulk_write([("A", ["B"]), ("B", [])])
+        assert store.get_links(["A"]).get("A") == ["B"]
+        assert factory.made["fetcher"].requested == []
+
+        store.forget("A")
+
+        assert store.get_links(["A"]).get("A") == ["B"]
+        assert factory.made["fetcher"].requested == ["A"]
+
+
+def test_a_walk_over_a_hole_is_not_exhaustive() -> None:
+    """Forgetting a page a walk needs makes the result honest about it."""
+    with LinkStore(":memory:") as store:
+        store.bulk_write([("A", ["B"]), ("B", ["Target"]), ("Target", [])])
+        assert Walker(store).find_path("A", "Target").complete
+
+        store.forget("B")
+        result = Walker(store).find_path("A", "Target")
+
+    assert result.path is None
+    assert result.unread == {"B"}
+    assert not result.complete

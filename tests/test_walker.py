@@ -272,7 +272,7 @@ def test_the_page_budget_stops_the_search_short(db: LinkDatabase) -> None:
     db.store("One", ["Target"])
     db.store("Target", [])
 
-    result = Walker(db, batch_size=1).find_path("Source", "Target", max_pages=1)
+    result = Walker(db, batch_size=1).find_path("Source", "Target", max_walked=1)
 
     assert result.path is None
     assert not result.complete

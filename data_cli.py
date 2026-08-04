@@ -61,7 +61,27 @@ SUPPORTED_WIKIS = {
     "simplewiki": ("simplewiki", "simple.wikipedia.org"),
 }
 
-MODES = ("test", "simplewiki", "wikipedia-us", "empty")
+MODES = ("test", "simplewiki", "wikipedia-us", "empty", "forget")
+
+
+def forget(db_path: str, title: str | None) -> None:
+    """Drop one article, so a later walk has to retrieve it again.
+
+    Makes the read-through visible: the same walk answers from the store
+    before, and from the network after.
+    """
+    if not title:
+        sys.exit("forget needs --title")
+    if not Path(db_path).exists():
+        sys.exit(f"{db_path} does not exist")
+
+    with LinkDatabase(db_path) as db:
+        pages, links = db.forget(title)
+
+    if not pages:
+        sys.exit(f"{title} is not in {db_path}")
+    print(f"Forgot {title} from {db_path}: dropped {links} outgoing link(s).")
+    print("It is now unknown, so the next walk that reaches it will fetch it.")
 
 
 def default_db(mode: str, wiki: str) -> str:
@@ -299,6 +319,8 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     argparser.add_argument("mode", choices=MODES, help="which dataset to build")
+    argparser.add_argument("--title", default=None,
+                           help="article to forget, so the next walk retrieves it again")
     argparser.add_argument("--db", default=None,
                            help="output database (default depends on mode)")
     argparser.add_argument("--wiki", default="wikipedia-us", choices=sorted(SUPPORTED_WIKIS),
@@ -309,6 +331,10 @@ def main() -> None:
     argparser.add_argument("--force", action="store_true",
                            help="overwrite an existing database")
     args = argparser.parse_args()
+
+    if args.mode == "forget":
+        forget(args.db or default_db("simplewiki", args.wiki), args.title)
+        return
 
     target = Path(args.db or default_db(args.mode, args.wiki))
     if target.exists() and not args.force:

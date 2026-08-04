@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable
 
+import logctx
 import wikifetcher
 from settings import DB_FILE, RED_LINK_TTL_S, SITE
 
@@ -13,6 +14,9 @@ from .db import LinkDatabase
 from .fetcher import LinkFetcher
 
 log = logging.getLogger(__name__)
+
+# Stored status -> what it means. Absent from the store is a state too.
+STATE = {"ok": "article", "redlink": "redlink", None: "unknown"}
 
 
 class LinkStore:
@@ -32,7 +36,10 @@ class LinkStore:
         fetcher: Callable[[str | None], wikifetcher.Fetcher] | None = None,
         *,
         concurrency: int = wikifetcher.MAX_CONCURRENCY,
+        max_fetched: int | None = None,
     ) -> None:
+        self._max_fetched = max_fetched
+        self.fetched = 0
         self._db = LinkDatabase(DB_FILE.get(name, name))
         self._fetcher = (
             LinkFetcher(fetcher(SITE.get(name)), concurrency=concurrency)
@@ -81,14 +88,24 @@ class LinkStore:
             )
             to_fetch.extend(stale)
 
+            # Whatever the budget will not cover stays absent, which the search
+            # already reads as "could not be read".
+            if self._max_fetched is not None:
+                allowed = max(0, self._max_fetched - self.fetched)
+                if len(to_fetch) > allowed:
+                    log.info(
+                        "    fetch budget %d reached: %d page(s) left unread",
+                        self._max_fetched, len(to_fetch) - allowed,
+                    )
+                    to_fetch = to_fetch[:allowed]
+
+            log.info(
+                "    %sbatch of %d: %d held, %d to retrieve",
+                logctx.where(), len(wanted), len(known), len(to_fetch),
+            )
             if to_fetch:
-                log.info(
-                    "batch of %d: %d held, %d to retrieve",
-                    len(wanted), len(known), len(to_fetch),
-                )
+                self.fetched += len(to_fetch)
                 pending = self._fetcher.submit(to_fetch)
-            else:
-                log.info("batch of %d: all held", len(wanted))
 
         self._open = BatchLinks(self, known, pending)
         return self._open
@@ -101,14 +118,22 @@ class LinkStore:
             known = self._db.status(title)
         return known
 
+    def state(self, title: str) -> str:
+        """What is known about a title: article, redlink, or unknown.
+
+        All three are properties of the page itself, so none of them change
+        when some other page does.
+        """
+        return STATE[self.status(title)]
+
     def write(self, title: str, links: list[str] | None) -> None:
         """Record what a retrieval found. Called by the batch as pages land."""
         if links is None:
             self.mark_red_links([title])
-            log.info("  no article at: %s", title)
+            log.info("      no article at: %s", title)
         else:
             self.store(title, links)
-            log.debug("  store %s (%d link(s))", title, len(links))
+            log.debug("      store %s (%d link(s))", title, len(links))
 
     def store(self, title: str, links: list[str]) -> None:
         self._db.store(title, links)
@@ -116,6 +141,10 @@ class LinkStore:
     def bulk_write(self, pages: Iterable[tuple[str, list[str] | None]]) -> tuple[int, int]:
         """Record many pages at once. `None` links mean no article exists."""
         return self._db.bulk_write(pages)
+
+    def forget(self, title: str) -> tuple[int, int]:
+        """Drop a title from the store so the next walk retrieves it again."""
+        return self._db.forget(title)
 
     def mark_red_links(self, titles: Iterable[str]) -> None:
         self._db.mark_red_links(titles)

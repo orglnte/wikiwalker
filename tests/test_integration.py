@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from link_store import LinkDatabase
+from link_store import LinkStore
 from walker import Walker
 
 WIKI_DB = Path(__file__).resolve().parent.parent / "simplewiki.db"
@@ -24,18 +24,18 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="module")
-def wiki() -> LinkDatabase:
-    with LinkDatabase(str(WIKI_DB)) as database:
+def wiki() -> LinkStore:
+    with LinkStore(str(WIKI_DB)) as database:
         yield database
 
 
-def test_the_database_records_which_wiki_it_holds(wiki: LinkDatabase) -> None:
+def test_the_database_records_which_wiki_it_holds(wiki: LinkStore) -> None:
     """Without this the tool renders links against an assumed host and can
     point at a different article of the same name on another wiki."""
     assert wiki.get_meta("site") in {"simple.wikipedia.org", "en.wikipedia.org"}
 
 
-def test_the_load_produced_articles_links_and_red_links(wiki: LinkDatabase) -> None:
+def test_the_load_produced_articles_links_and_red_links(wiki: LinkStore) -> None:
     assert wiki.page_count() > 100_000
     assert wiki.link_count() > 1_000_000
     assert wiki.red_link_count() > 0, (
@@ -44,20 +44,21 @@ def test_the_load_produced_articles_links_and_red_links(wiki: LinkDatabase) -> N
     )
 
 
-def test_every_link_target_is_either_an_article_or_a_red_link(wiki: LinkDatabase) -> None:
+def test_every_link_target_is_either_an_article_or_a_red_link(wiki: LinkStore) -> None:
     """A target that is neither is a hole, and a search crossing one can no
     longer claim its answer is the shortest."""
     sample = random.Random(0).sample(sorted(wiki.get_links(_some_titles(wiki))), 50)
-    targets = {link for links in wiki.get_links(sample).values() for link in links}
+    targets = {
+        link for links in wiki.get_links(sample).values() if links for link in links
+    }
 
-    articles = wiki.get_links(targets)
-    dead = wiki.red_links(targets)
-    unexplained = sorted(t for t in targets if t not in articles and t not in dead)
+    known = wiki.get_links(targets)
+    unexplained = sorted(t for t in targets if t not in known)
 
     assert unexplained == [], f"{len(unexplained)} unexplained targets, e.g. {unexplained[:5]}"
 
 
-def test_a_known_search_returns_a_short_verified_path(wiki: LinkDatabase) -> None:
+def test_a_known_search_returns_a_short_verified_path(wiki: LinkStore) -> None:
     """The exact depth moves with each dump, so the assertion is on the path
     being real: every consecutive pair must be an edge that exists."""
     result = Walker(wiki).find_path("April", "Nigeria")
@@ -65,7 +66,7 @@ def test_a_known_search_returns_a_short_verified_path(wiki: LinkDatabase) -> Non
     assert result.path is not None
     assert result.path[0] == "April" and result.path[-1] == "Nigeria"
     assert result.depth_reached <= 3
-    assert result.complete, f"search hit {len(result.missing)} absent pages"
+    assert result.complete, f"search hit {len(result.unread)} unread pages"
 
     links = wiki.get_links(result.path[:-1])
     pairs = zip(result.path, result.path[1:], strict=False)
@@ -73,11 +74,11 @@ def test_a_known_search_returns_a_short_verified_path(wiki: LinkDatabase) -> Non
         assert dst in links[src], f"step {step}: {src} does not link to {dst}"
 
 
-def _some_titles(wiki: LinkDatabase) -> list[str]:
+def _some_titles(wiki: LinkStore) -> list[str]:
     """A handful of real article titles to start the sampling from."""
     return [
         title
-        for (title,) in wiki._conn.execute(
+        for (title,) in wiki._db._conn.execute(
             "SELECT title FROM pages WHERE status = 'ok' LIMIT 200"
         )
     ]

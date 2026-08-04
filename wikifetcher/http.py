@@ -12,6 +12,8 @@ from settings import (
     HTTP_BACKOFF_S,
     HTTP_RETRIES,
     HTTP_TIMEOUT_S,
+    MAX_CONSECUTIVE_FAILURES,
+    MAX_RATE_LIMIT_PAUSES,
     MIN_REQUEST_INTERVAL_S,
     RETRYABLE_STATUS,
     USER_AGENT,
@@ -31,6 +33,10 @@ class RateLimited(PageUnavailable):
     """The site asked us to stop. Nothing further is sent."""
 
 
+class SiteUnreachable(PageUnavailable):
+    """Too many pages failed in a row for the site to be up."""
+
+
 class HttpFetcher:
     """Reads one wiki page per call.
 
@@ -48,7 +54,14 @@ class HttpFetcher:
         retries: int = HTTP_RETRIES,
         backoff_s: float = HTTP_BACKOFF_S,
         min_interval_s: float = MIN_REQUEST_INTERVAL_S,
+        failure_limit: int | None = MAX_CONSECUTIVE_FAILURES,
+        pause_limit: int = MAX_RATE_LIMIT_PAUSES,
     ) -> None:
+        self._failure_limit = failure_limit
+        self._failures = 0
+        self._pause_limit = pause_limit
+        self._pauses = 0
+        self._resume_at = 0.0
         self.site = site or DEFAULT_SITE
         self._timeout_s = timeout_s
         self._retries = retries
@@ -63,8 +76,31 @@ class HttpFetcher:
         # One 429 stops the whole fetcher. Ten requests each backing off on
         # their own is not backing off.
         if self._stopped:
-            raise RateLimited(f"{title}: not sent, already rate limited")
+            raise RateLimited(f"{title}: not sent, the fetcher has stopped")
 
+        try:
+            links = await self._read(title)
+        except PageUnavailable:
+            self._note_failure()
+            raise
+
+        self._failures = 0
+        return links
+
+    def _note_failure(self) -> None:
+        """One page failing is that page's problem; a run of them is the site's."""
+        self._failures += 1
+        if self._failure_limit is None or self._failures < self._failure_limit:
+            return
+        self._stopped = True
+        log.error(
+            "%d pages failed in a row — stopping. Pass --walk-anyway to keep "
+            "going on whatever the store already holds.",
+            self._failures,
+        )
+        raise SiteUnreachable(f"{self._failures} consecutive failures")
+
+    async def _read(self, title: str) -> list[str] | None:
         client = self._ensure_client()
         url = to_url(title, self.site)
 
@@ -79,18 +115,12 @@ class HttpFetcher:
                 continue
 
             if response.status_code == 404:
-                log.debug("    GET %s -> 404", title)
+                log.debug("        GET %s -> 404", title)
                 return None
 
             if response.status_code == 429:
-                if not self._stopped:
-                    self._stopped = True
-                    log.error(
-                        "%s is rate limiting us (Retry-After: %s) — stopping. "
-                        "Nothing further will be requested.",
-                        self.site, response.headers.get("retry-after", "unset"),
-                    )
-                raise RateLimited(f"{title}: HTTP 429")
+                self._hold_off(response.headers.get("retry-after"))
+                continue
 
             if response.status_code in RETRYABLE_STATUS:
                 if attempt == self._retries:
@@ -103,7 +133,7 @@ class HttpFetcher:
 
             html = response.text
             links = await asyncio.to_thread(extract_links, html, site=self.site)
-            log.debug("    GET %s -> %dB, %d link(s)", title, len(html), len(links))
+            log.debug("        GET %s -> %dB, %d link(s)", title, len(html), len(links))
             return links
 
         raise PageUnavailable(title)  # unreachable; the loop always returns or raises
@@ -124,12 +154,41 @@ class HttpFetcher:
             )
         return self._client
 
+    def _hold_off(self, retry_after: str | None) -> None:
+        """Make every request wait, not just this one.
+
+        Retry-After is a resume time, so it is honoured — but by one shared
+        gate. Ten requests each backing off on their own is ten more knocks.
+        """
+        self._pauses += 1
+        if self._pauses > self._pause_limit:
+            self._stopped = True
+            log.error(
+                "%s rate limited us %d times — stopping. Pass --walk-anyway to "
+                "keep going on whatever the store already holds.",
+                self.site, self._pauses - 1,
+            )
+            raise RateLimited(f"rate limited {self._pauses - 1} times")
+
+        delay = (
+            float(retry_after)
+            if retry_after and retry_after.isdigit()
+            else self._backoff_s * 2**self._pauses
+        )
+        self._resume_at = time.monotonic() + delay
+        log.warning(
+            "%s asked us to wait %.0fs (Retry-After: %s) — pausing everything",
+            self.site, delay, retry_after or "unset",
+        )
+
     async def _pace(self) -> None:
-        """Hold requests to `min_interval_s` apart, however many are in flight."""
-        if not self._min_interval_s:
-            return
+        """Hold requests apart, and behind any pause the site asked for."""
         async with self._pace_lock:
-            wait = self._min_interval_s - (time.monotonic() - self._last_sent)
+            now = time.monotonic()
+            wait = max(
+                self._resume_at - now,
+                self._min_interval_s - (now - self._last_sent),
+            )
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last_sent = time.monotonic()

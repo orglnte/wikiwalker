@@ -291,6 +291,21 @@ class LinkDatabase:
                 )
                 self._conn.execute("DELETE FROM links WHERE src = ?", (title,))
 
+    def forget(self, title: str) -> tuple[int, int]:
+        """Remove a title and its links, returning it to `unknown`.
+
+        Not the same as marking it a red link: that records "no article
+        exists", this records nothing at all, so the next walk fetches it.
+        """
+        with self._conn:
+            links = self._conn.execute(
+                "DELETE FROM links WHERE src = ?", (title,)
+            ).rowcount
+            pages = self._conn.execute(
+                "DELETE FROM pages WHERE title = ?", (title,)
+            ).rowcount
+        return pages, links
+
     def touch(self, title: str) -> None:
         """Move only the timestamp — for a conditional GET returning 304."""
         with self._conn:

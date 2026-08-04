@@ -16,7 +16,12 @@ import time
 import httpx
 import pytest
 
-from wikifetcher.http import HttpFetcher, PageUnavailable, RateLimited
+from wikifetcher.http import (
+    HttpFetcher,
+    PageUnavailable,
+    RateLimited,
+    SiteUnreachable,
+)
 
 SITE = "en.wikipedia.org"
 
@@ -113,39 +118,49 @@ def test_retries_are_bounded() -> None:
 # Rate limiting
 # --------------------------------------------------------------------------
 
-def test_a_429_is_not_retried() -> None:
-    """429 is the site asking us to stop. Knocking again is not backing off."""
-    attempts = []
+def test_a_429_pauses_and_then_retries() -> None:
+    """Retry-After is a resume time, not a refusal, so it is honoured."""
+    codes = iter([429, 200])
 
+    def scripted(request):
+        code = next(codes)
+        return httpx.Response(code, text=PAGE if code == 200 else "")
+
+    f = fetcher(scripted, retries=3)
+
+    assert run(f.fetch("Bristol")) == ["England", "Somerset"]
+
+
+def test_a_429_sets_a_pause_rather_than_failing_the_page() -> None:
+    """Retry-After becomes a resume time held on the fetcher, not this call."""
     def limited(request):
-        attempts.append(request)
-        return httpx.Response(429, headers={"retry-after": "11"})
+        return httpx.Response(429, headers={"retry-after": "5"})
 
-    f = fetcher(limited, retries=3)
+    f = fetcher(limited, retries=0, pause_limit=5)
 
-    with pytest.raises(RateLimited):
+    with pytest.raises(PageUnavailable):
         run(f.fetch("Bristol"))
-    assert len(attempts) == 1
+
+    assert f._resume_at > time.monotonic() + 4
 
 
-def test_one_429_stops_every_later_request() -> None:
-    """Ten requests in flight each backing off independently is ten more
-    requests. After the first refusal nothing else is sent."""
+def test_being_told_to_wait_too_often_stops_the_fetcher() -> None:
     attempts = []
 
     def limited(request):
         attempts.append(request)
         return httpx.Response(429)
 
-    f = fetcher(limited)
+    f = fetcher(limited, retries=10, pause_limit=2)
 
     with pytest.raises(RateLimited):
         run(f.fetch("Bristol"))
-    for title in ("Bath", "Wells", "Frome"):
-        with pytest.raises(RateLimited):
-            run(f.fetch(title))
+    assert len(attempts) == 3           # two pauses accepted, the third refused
 
-    assert len(attempts) == 1
+    before = len(attempts)
+    with pytest.raises(RateLimited):
+        run(f.fetch("Bath"))
+    assert len(attempts) == before      # nothing sent after it has stopped
 
 
 # --------------------------------------------------------------------------
@@ -209,3 +224,158 @@ def test_requests_are_spaced_out_however_many_are_in_flight() -> None:
     assert elapsed >= 4 * 0.05
     gaps = [b - a for a, b in zip(sent, sent[1:], strict=False)]
     assert all(gap >= 0.04 for gap in gaps), gaps
+
+
+# --------------------------------------------------------------------------
+# Giving up on the site
+# --------------------------------------------------------------------------
+
+def test_one_page_failing_does_not_stop_the_others() -> None:
+    """A broken page is that page's problem. The next title still goes out."""
+    def only_bristol_fails(request):
+        if "Bristol" in str(request.url):
+            return httpx.Response(500)
+        return httpx.Response(200, text=PAGE)
+
+    f = fetcher(only_bristol_fails, retries=0, failure_limit=3)
+
+    with pytest.raises(PageUnavailable):
+        run(f.fetch("Bristol"))
+    assert run(f.fetch("Bath")) == ["England", "Somerset"]
+
+
+def test_enough_failures_in_a_row_stop_the_fetcher() -> None:
+    attempts = []
+
+    def always_failing(request):
+        attempts.append(request)
+        return httpx.Response(500)
+
+    f = fetcher(always_failing, retries=0, failure_limit=3)
+
+    for _ in range(2):
+        with pytest.raises(PageUnavailable):
+            run(f.fetch("X"))
+    with pytest.raises(SiteUnreachable):
+        run(f.fetch("X"))
+
+    # nothing is sent once it has stopped
+    before = len(attempts)
+    with pytest.raises(RateLimited):
+        run(f.fetch("Y"))
+    assert len(attempts) == before
+
+
+def test_a_success_clears_the_failure_run() -> None:
+    """Two failures, a success, two more failures must not trip a limit of 3."""
+    responses = iter([500, 500, 200, 500, 500])
+
+    def scripted(request):
+        code = next(responses)
+        return httpx.Response(code, text=PAGE if code == 200 else "")
+
+    f = fetcher(scripted, retries=0, failure_limit=3)
+
+    for _ in range(2):
+        with pytest.raises(PageUnavailable):
+            run(f.fetch("X"))
+    assert run(f.fetch("X")) == ["England", "Somerset"]
+    for _ in range(2):
+        with pytest.raises(PageUnavailable):
+            run(f.fetch("X"))
+
+
+def test_the_limit_can_be_lifted() -> None:
+    """What --walk-anyway does: never stop on the site's account."""
+    def always_failing(request):
+        return httpx.Response(500)
+
+    f = fetcher(always_failing, retries=0, failure_limit=None)
+
+    for _ in range(20):
+        with pytest.raises(PageUnavailable):
+            run(f.fetch("X"))
+    assert not f._stopped
+
+
+# --------------------------------------------------------------------------
+# Which statuses are retried
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_server_errors_are_retried(status: int) -> None:
+    attempts = []
+
+    def failing(request):
+        attempts.append(request)
+        return httpx.Response(status)
+
+    f = fetcher(failing, retries=2)
+
+    with pytest.raises(PageUnavailable):
+        run(f.fetch("Bristol"))
+    assert len(attempts) == 3
+
+
+@pytest.mark.parametrize("status", [400, 403, 451])
+def test_client_errors_are_not_retried(status: int) -> None:
+    """Asking again cannot change the answer."""
+    attempts = []
+
+    def refusing(request):
+        attempts.append(request)
+        return httpx.Response(status)
+
+    f = fetcher(refusing, retries=3)
+
+    with pytest.raises(PageUnavailable):
+        run(f.fetch("Bristol"))
+    assert len(attempts) == 1
+
+
+def test_backoff_grows_between_attempts() -> None:
+    sent = []
+
+    def failing(request):
+        sent.append(time.monotonic())
+        return httpx.Response(503)
+
+    f = HttpFetcher(SITE, backoff_s=0.02, min_interval_s=0.0, retries=2)
+    f._client = httpx.AsyncClient(transport=httpx.MockTransport(failing))
+
+    with pytest.raises(PageUnavailable):
+        run(f.fetch("Bristol"))
+
+    gaps = [b - a for a, b in zip(sent, sent[1:], strict=False)]
+    assert len(gaps) == 2
+    assert gaps[1] > gaps[0]        # 0.02s then 0.04s
+
+
+def test_a_429_holds_back_requests_that_have_not_gone_out_yet() -> None:
+    """The gate is on the fetcher, so requests still queued wait behind it.
+
+    Requests already on the wire cannot be recalled — this covers the ones
+    that have not left.
+    """
+    sent = []
+    refused_at = []
+
+    def scripted(request):
+        sent.append(time.monotonic())
+        if not refused_at:
+            refused_at.append(time.monotonic())
+            return httpx.Response(429)
+        return httpx.Response(200, text=PAGE)
+
+    f = HttpFetcher(SITE, min_interval_s=0.02, backoff_s=0.1, retries=3, pause_limit=5)
+    f._client = httpx.AsyncClient(transport=httpx.MockTransport(scripted))
+
+    async def several():
+        await asyncio.gather(*(f.fetch(f"P{i}") for i in range(5)))
+
+    run(several())
+
+    # everything sent after the refusal waited for the pause the fetcher set
+    after = [t for t in sent if t > refused_at[0]]
+    assert after, "no requests followed the 429"
+    assert min(after) - refused_at[0] >= 0.15, [t - refused_at[0] for t in after]

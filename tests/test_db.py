@@ -212,3 +212,43 @@ def test_meta_overwrites_rather_than_duplicating(sql: LinkDatabase) -> None:
     sql.set_meta("site", "second.example")
 
     assert sql.get_meta("site") == "second.example"
+
+
+# --------------------------------------------------------------------------
+# Forgetting
+# --------------------------------------------------------------------------
+
+def test_forgetting_a_page_returns_it_to_unknown(sql: LinkDatabase) -> None:
+    """Not the same as marking it a red link: that says "no article exists",
+    this says nothing at all, so the next walk fetches it."""
+    sql.store("Cheshire", ["Cheese", "England"])
+
+    pages, links = sql.forget("Cheshire")
+
+    assert (pages, links) == (1, 2)
+    assert sql.status("Cheshire") is None
+    assert sql.get_links(["Cheshire"]) == {}
+
+
+def test_forgetting_leaves_links_pointing_at_it(sql: LinkDatabase) -> None:
+    """Only the page's own row and outgoing links go. What other pages say
+    about it is their data, not its."""
+    sql.store("Bristol", ["Cheshire"])
+    sql.store("Cheshire", ["Cheese"])
+
+    sql.forget("Cheshire")
+
+    assert sql.get_links(["Bristol"]) == {"Bristol": ["Cheshire"]}
+
+
+def test_forgetting_a_title_that_is_not_there_changes_nothing(sql: LinkDatabase) -> None:
+    assert sql.forget("Nowhere") == (0, 0)
+
+
+def test_a_forgotten_red_link_is_no_longer_a_red_link(sql: LinkDatabase) -> None:
+    sql.mark_red_links(["Nowhere"])
+
+    sql.forget("Nowhere")
+
+    assert sql.status("Nowhere") is None
+    assert sql.red_link_count() == 0

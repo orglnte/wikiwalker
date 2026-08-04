@@ -34,12 +34,12 @@ class LocalFetcher:
 
         html = sample_wiki.render(title)
         if html is None:
-            log.debug("    GET %s -> 404", title)
+            log.debug("        GET %s -> 404", title)
             return None
 
         # Parsing is pure Python and would otherwise hold the event loop for
         # the whole page. On a free-threaded build this also puts it on another
         # core; on a stock one it only stops the loop stalling.
         links = await asyncio.to_thread(extract_links, html, site=self.site)
-        log.debug("    GET %s -> %dB, %d link(s)", title, len(html), len(links))
+        log.debug("        GET %s -> %dB, %d link(s)", title, len(html), len(links))
         return links
