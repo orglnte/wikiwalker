@@ -12,7 +12,7 @@ pip install -e ".[dev]"
 pytest                       # 57 tests, no network
 ```
 
-The CLIs run without installing anything: `python3 walker.py --test L0 L3_26`.
+The CLIs run without installing anything: `python3 walker.py --mode test L0 L3_26`.
 
 ## Layout
 
@@ -62,14 +62,14 @@ so it must be a real article; a target only needs to be linked to, so a red
 link is reachable and is reported, not refused.
 
 **Bulk load and crawl must produce identical databases.** `data_cli.py test`
-writes `sample_wiki.GRAPH` directly; `walker.py --test` renders the same graph
-to HTML and re-derives it through the real parser. Equality is therefore an
-assertion about `html_links.py`. Check it after touching either:
+writes `sample_wiki.GRAPH` directly; `walker.py --mode test` renders the same
+graph to HTML and re-derives it through the real parser. Equality is therefore
+an assertion about `html_links.py`. Check it after touching either:
 
 ```
 python3 data_cli.py test --db tmp/bulk.db
 python3 data_cli.py empty --db tmp/crawl.db
-python3 walker.py --test --db tmp/crawl.db -q L0 Orphan
+python3 walker.py --mode test --db tmp/crawl.db L0 Orphan
 # then compare pages and links tables
 ```
 
@@ -93,7 +93,8 @@ One per dataset, all gitignored — rebuild rather than expect them present.
 | `data_cli.py enwiki` | `wikipedia-us.db` (much larger, unverified) |
 
 `data_cli.py` refuses to overwrite an existing database without `--force`.
-`walker.py` defaults to `test.db` with `--test`, else `simplewiki.db`.
+`walker.py --mode` picks the store: read -> simplewiki.db, test -> test.db,
+crawl -> wikipedia-us.db. `--db` overrides it.
 
 `tests/test_integration.py` skips itself when `simplewiki.db` is absent.
 

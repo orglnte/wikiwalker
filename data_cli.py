@@ -36,11 +36,12 @@ import sys
 import time
 from pathlib import Path
 
+import wikifetcher
 from link_store import DB_FILE, LinkDatabase
+from settings import DUMPS_URL as BASE_URL
 from wikifetcher import sample_wiki
 
-BASE_URL = "https://dumps.wikimedia.org"
-USER_AGENT = "wikiwalker/0.1 (https://github.com/orglnte/wikiwalker)"
+USER_AGENT = wikifetcher.USER_AGENT
 
 # `page` maps ids to titles and flags redirects; `pagelinks` holds the edges.
 # Since ~2024 pagelinks stores an id into `linktarget` rather than the
@@ -79,9 +80,9 @@ def populate_test(db: LinkDatabase) -> None:
     two ways of building the test database diverge.
     """
     graph = sample_wiki.GRAPH
-    for title, links in graph.items():
-        db.store(title, links)
-    db.mark_red_links(sorted(sample_wiki.RED_LINKS))
+    db.bulk_write(
+        [*graph.items(), *((title, None) for title in sorted(sample_wiki.RED_LINKS))]
+    )
     db.set_meta("site", sample_wiki.SITE)
     db.set_meta("wiki", "test")
 
@@ -249,40 +250,10 @@ def build(db_path: str, *, keep_staging: bool = False) -> None:
     )
 
     print("Building links...")
-    conn.executescript(
-        f"""
-        DELETE FROM links;
-        DELETE FROM pages;
-
-        INSERT INTO links (src, dst, ord)
-        SELECT p.page_title,
-               r.title,
-               ROW_NUMBER() OVER (PARTITION BY p.page_title ORDER BY r.title) - 1
-        FROM t_pagelinks e
-        JOIN t_page     p ON p.page_id = e.pl_from
-                         AND p.page_namespace = '{MAIN_NAMESPACE}'
-                         AND p.page_is_redirect = '0'
-        JOIN t_resolved r ON r.target_id = e.pl_target_id
-        WHERE e.pl_from_namespace = '{MAIN_NAMESPACE}';
-
-        -- Every non-redirect article, including ones with no outgoing links: a
-        -- snapshot is complete by construction, so no links is knowledge.
-        INSERT INTO pages (title, fetched_at, etag, status)
-        SELECT page_title, strftime('%s', 'now'), NULL, 'ok'
-        FROM t_page
-        WHERE page_namespace = '{MAIN_NAMESPACE}' AND page_is_redirect = '0';
-
-        -- Titles articles link to that have no article. They outnumber articles
-        -- several times over; without them the search cannot tell "no such
-        -- article" from "not looked at yet".
-        INSERT OR IGNORE INTO pages (title, fetched_at, etag, status)
-        SELECT DISTINCT r.title, strftime('%s', 'now'), NULL, 'redlink'
-        FROM t_resolved r
-        WHERE r.title NOT IN (SELECT title FROM pages);
-        """
-    )
-
     conn.commit()
+    with LinkDatabase(db_path) as store:
+        store.build_from_staging(MAIN_NAMESPACE)
+
     pages = conn.execute("SELECT COUNT(*) FROM pages WHERE status='ok'").fetchone()[0]
     reds = conn.execute("SELECT COUNT(*) FROM pages WHERE status='redlink'").fetchone()[0]
     edges = conn.execute("SELECT COUNT(*) FROM links").fetchone()[0]

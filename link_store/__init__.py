@@ -10,13 +10,12 @@ the wire is not visible from outside it.
 """
 
 from .batch import UNKNOWN, BatchLinks
-from .db import RED_LINK_TTL_S, SCHEMA, LinkDatabase
+from .db import SCHEMA, LinkDatabase
 from .fetcher import LinkFetcher
 from .store import DB_FILE, LinkStore
 
 __all__ = [
     "DB_FILE",
-    "RED_LINK_TTL_S",
     "SCHEMA",
     "UNKNOWN",
     "BatchLinks",

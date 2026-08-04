@@ -14,6 +14,8 @@ import sqlite3
 import time
 from collections.abc import Iterable, Iterator
 
+from settings import SQLITE_PARAM_BATCH as _PARAM_BATCH
+
 SCHEMA = """
 -- Holds `site`: the same title names different articles on different wikis, so
 -- URLs cannot be rendered without it.
@@ -42,13 +44,6 @@ CREATE TABLE IF NOT EXISTS links (
 CREATE INDEX IF NOT EXISTS ix_links_src ON links(src);
 """
 
-# SQLite's host-parameter cap per statement is 999 on older builds. Every
-# IN (...) query batches below it.
-_PARAM_BATCH = 900
-
-# A red link only changes when someone writes the article, so re-checking one
-# every run buys nothing.
-RED_LINK_TTL_S = 24 * 60 * 60
 
 
 class LinkDatabase:
@@ -198,6 +193,86 @@ class LinkDatabase:
             self._conn.executemany(
                 "INSERT INTO links (src, dst, ord) VALUES (?, ?, ?)",
                 [(title, dst, i) for i, dst in enumerate(links)],
+            )
+
+    def bulk_write(self, pages: Iterable[tuple[str, list[str] | None]]) -> tuple[int, int]:
+        """Record many pages at once. `None` links mean no article exists.
+
+        One transaction for the lot, so an interrupted load leaves the store as
+        it was. Returns (articles, red links) written.
+        """
+        now = time.time()
+        articles: list[tuple[str, float]] = []
+        dead: list[tuple[str, float]] = []
+        edges: list[tuple[str, str, int]] = []
+        replaced: list[tuple[str]] = []
+
+        for title, links in pages:
+            replaced.append((title,))
+            if links is None:
+                dead.append((title, now))
+            else:
+                articles.append((title, now))
+                edges.extend((title, dst, i) for i, dst in enumerate(links))
+
+        with self._conn:
+            self._conn.executemany("DELETE FROM links WHERE src = ?", replaced)
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO pages (title, fetched_at, etag, status) "
+                "VALUES (?, ?, NULL, 'ok')",
+                articles,
+            )
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO pages (title, fetched_at, etag, status) "
+                "VALUES (?, ?, NULL, 'redlink')",
+                dead,
+            )
+            self._conn.executemany(
+                "INSERT INTO links (src, dst, ord) VALUES (?, ?, ?)", edges
+            )
+
+        return len(articles), len(dead)
+
+    def build_from_staging(self, namespace: str) -> None:
+        """Fill `pages` and `links` from staged MediaWiki tables.
+
+        The joins belong to whoever staged the dump; the column names belong
+        here. Kept in one place so the schema stays private to this module.
+
+        Expects `t_page`, `t_pagelinks` and `t_resolved` to exist.
+        """
+        with self._conn:
+            self._conn.executescript(
+                f"""
+                DELETE FROM links;
+                DELETE FROM pages;
+
+                INSERT INTO links (src, dst, ord)
+                SELECT p.page_title,
+                       r.title,
+                       ROW_NUMBER() OVER (PARTITION BY p.page_title ORDER BY r.title) - 1
+                FROM t_pagelinks e
+                JOIN t_page     p ON p.page_id = e.pl_from
+                                 AND p.page_namespace = '{namespace}'
+                                 AND p.page_is_redirect = '0'
+                JOIN t_resolved r ON r.target_id = e.pl_target_id
+                WHERE e.pl_from_namespace = '{namespace}';
+
+                -- Every non-redirect article, including ones linking nowhere: a
+                -- snapshot is complete by construction, so no links is knowledge.
+                INSERT INTO pages (title, fetched_at, etag, status)
+                SELECT page_title, strftime('%s', 'now'), NULL, 'ok'
+                FROM t_page
+                WHERE page_namespace = '{namespace}' AND page_is_redirect = '0';
+
+                -- Titles linked to that have no article. They outnumber articles
+                -- several times over; without them the search cannot tell "no
+                -- such article" from "not looked at yet".
+                INSERT OR IGNORE INTO pages (title, fetched_at, etag, status)
+                SELECT DISTINCT r.title, strftime('%s', 'now'), NULL, 'redlink'
+                FROM t_resolved r
+                WHERE r.title NOT IN (SELECT title FROM pages);
+                """
             )
 
     def mark_red_links(self, titles: Iterable[str]) -> None:

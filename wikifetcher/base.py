@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Protocol
 
-# Ten in flight: the cap the brief names, and polite regardless. Enforced by
-# whoever drives the fetcher, not by the fetcher itself.
-MAX_CONCURRENCY = 10
+from settings import MAX_CONCURRENCY, USER_AGENT
+
+__all__ = ["MAX_CONCURRENCY", "USER_AGENT", "Fetcher"]
 
 
 class Fetcher(Protocol):

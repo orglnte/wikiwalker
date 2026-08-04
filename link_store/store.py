@@ -3,23 +3,16 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import wikifetcher
+from settings import DB_FILE, RED_LINK_TTL_S, SITE
 
 from .batch import BatchLinks
-from .db import RED_LINK_TTL_S, LinkDatabase
+from .db import LinkDatabase
 from .fetcher import LinkFetcher
 
 log = logging.getLogger(__name__)
-
-# One store per dataset. A name not listed here is taken as a path, so tests
-# can ask for ":memory:".
-DB_FILE = {
-    "test": "test.db",
-    "simplewiki": "simplewiki.db",
-    "wikipedia-us": "wikipedia-us.db",
-}
 
 
 class LinkStore:
@@ -33,9 +26,19 @@ class LinkStore:
     when walking a loaded dump.
     """
 
-    def __init__(self, name: str, fetcher: type[wikifetcher.Fetcher] | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        fetcher: Callable[[str | None], wikifetcher.Fetcher] | None = None,
+        *,
+        concurrency: int = wikifetcher.MAX_CONCURRENCY,
+    ) -> None:
         self._db = LinkDatabase(DB_FILE.get(name, name))
-        self._fetcher = LinkFetcher(fetcher()) if fetcher is not None else None
+        self._fetcher = (
+            LinkFetcher(fetcher(SITE.get(name)), concurrency=concurrency)
+            if fetcher is not None
+            else None
+        )
         self._open: BatchLinks | None = None
 
         # A fetcher decides which wiki this store holds; a loaded one already
@@ -109,6 +112,10 @@ class LinkStore:
 
     def store(self, title: str, links: list[str]) -> None:
         self._db.store(title, links)
+
+    def bulk_write(self, pages: Iterable[tuple[str, list[str] | None]]) -> tuple[int, int]:
+        """Record many pages at once. `None` links mean no article exists."""
+        return self._db.bulk_write(pages)
 
     def mark_red_links(self, titles: Iterable[str]) -> None:
         self._db.mark_red_links(titles)

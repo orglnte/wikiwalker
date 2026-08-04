@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 import wikifetcher
 
-USER_AGENT = "wikiwalker/0.1 (https://github.com/orglnte/wikiwalker)"
+USER_AGENT = wikifetcher.USER_AGENT
 
 
 def fetch(url: str) -> str:

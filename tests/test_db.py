@@ -12,7 +12,8 @@ of what follows is checking they stay apart.
 
 from __future__ import annotations
 
-from link_store import RED_LINK_TTL_S, LinkDatabase
+from link_store import LinkDatabase
+from settings import RED_LINK_TTL_S
 
 # --------------------------------------------------------------------------
 # The three-way distinction

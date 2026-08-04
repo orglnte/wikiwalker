@@ -2,21 +2,19 @@
 """Find the shortest path between two Wikipedia articles, walking the link database.
 
 Usage:
-    python3 walker.py "Walton Cardiff" Bristol
-    python3 walker.py Bristol London --max-depth 6
-    python3 walker.py --test L0 L3_26
+    python3 walker.py read-only Bristol Cheese
+    python3 walker.py test L0 L3_26
+    python3 walker.py crawl Bristol England
 
-Reads the database `data_cli.py` builds. With `--test` it crawls a synthetic
-wiki instead, filling the database as it goes.
 
-Breadth-first because it visits every page at distance N before any at N+1, so
-the target is found at its minimum distance. Depth-first finds *a* path, not the
-shortest; Dijkstra degenerates to BFS on uniform edge costs.
+Breadth-first visits every page at distance N before any at N+1, so the target
+is found at its minimum distance.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import sys
 import sysconfig
@@ -25,8 +23,43 @@ from dataclasses import dataclass, field
 
 import wikifetcher
 from link_store import UNKNOWN, LinkStore
+from settings import (
+    CRAWL_PAGE_BUDGET,
+    MAX_CONCURRENCY,
+    MIN_REQUEST_INTERVAL_S,
+    WALK_BATCH_SIZE,
+)
 
 log = logging.getLogger("walker")
+
+
+@dataclass(frozen=True)
+class Mode:
+    """One functional scenario: which store, which fetcher, what budget."""
+
+    store: str
+    fetcher: type[wikifetcher.Fetcher] | None
+    page_budget: int | None
+    summary: str
+
+
+MODES = {
+    "read-only": Mode(
+        "simplewiki", None, page_budget=None,
+        summary="read-only, never fetches (for testing)",
+    ),
+    "test": Mode(
+        "test", wikifetcher.LocalFetcher, page_budget=None,
+        summary="synthetic 41-page wiki, no network (for testing)",
+    ),
+    "crawl": Mode(
+        "wikipedia-us", wikifetcher.HttpFetcher,
+        page_budget=CRAWL_PAGE_BUDGET,
+        summary=f"fetches what is missing over HTTP, at most {CRAWL_PAGE_BUDGET} pages",
+    ),
+}
+
+
 
 
 @dataclass
@@ -57,10 +90,8 @@ class WalkResult:
 class Walker:
     """Breadth-first search over a link store."""
 
-    def __init__(self, store: LinkStore, *, batch_size: int = 5000) -> None:
+    def __init__(self, store: LinkStore, *, batch_size: int = WALK_BATCH_SIZE) -> None:
         self._store = store
-        # How many pages' link lists to hold at once. A BFS level can reach
-        # hundreds of thousands of pages; all their links together is gigabytes.
         self._batch_size = batch_size
 
     def find_path(
@@ -138,6 +169,7 @@ class Walker:
         # boundary between explored and not yet explored
         frontier = [source]
         expanded = 0
+        batch_number = 0
         trace = log.isEnabledFor(logging.DEBUG)
 
         log.info("walk %s -> %s (max depth %d)", source, target, max_depth)
@@ -150,33 +182,36 @@ class Walker:
             # batched walk
             for start in range(0, len(frontier), self._batch_size):
                 batch = frontier[start : start + self._batch_size]
-
-                if max_pages is not None and expanded >= max_pages:
-                    log.info("  stopping: page budget %d reached", max_pages)
-                    return WalkResult(
-                        None, depth, expanded, False,
-                        time.monotonic() - started, unread,
-                    )
-
                 links = self._store.get_links(batch)
-                dead_ends = 0
+                batch_number += 1
+                in_batch = {"expanded": 0, "dead": 0, "unread": 0}
 
                 for page in batch:
+                    # Check if we are over the max pages budget
+                    if max_pages is not None and expanded >= max_pages:
+                        log.info("  stopping: page budget %d reached", max_pages)
+                        return WalkResult(
+                            None, depth, expanded, False,
+                            time.monotonic() - started, unread,
+                        )
+
                     outgoing_links = links.get(page, UNKNOWN)
 
                     if outgoing_links is UNKNOWN:
                         # Could not be read: a gap in a dump, a failed fetch in
                         # a crawl. Either way the walk is not exhaustive.
-                        unread.add(page)
+                        unread.add(page) # NOTE to be decided if retry or not, if sleep/wait or not
+                        in_batch["unread"] += 1
                         continue
 
                     if outgoing_links is None:
                         # No article behind the title. A real dead end, and it
                         # costs the answer nothing.
-                        dead_ends += 1
+                        in_batch["dead"] += 1
                         continue
 
                     expanded += 1
+                    in_batch["expanded"] += 1
                     discovered = 0
 
                     for link in outgoing_links:
@@ -184,6 +219,7 @@ class Walker:
                             # Already discovered at this depth or a shallower one
                             continue
 
+                        # TODO fix this comment
                         # Visited at discovery, not expansion — otherwise a hub
                         # is queued once per inbound link.
                         parent[link] = page
@@ -211,8 +247,9 @@ class Walker:
                         )
 
                 log.info(
-                    "  batch of %d: %d expanded, %d dead end(s), %d unread",
-                    len(batch), expanded, dead_ends, len(unread),
+                    "  batch %d (size %d): %d expanded, %d dead end(s), %d unread",
+                    batch_number, len(batch),
+                    in_batch["expanded"], in_batch["dead"], in_batch["unread"],
                 )
 
             if not next_frontier:
@@ -232,7 +269,6 @@ class Walker:
             None, max_depth, expanded, False, time.monotonic() - started, unread
         )
 
-# TODO why
 def _reconstruct(parent: dict[str, str | None], target: str) -> list[str]:
     """Walk the parent chain from `target` back to the source, then reverse it."""
     path = [target]
@@ -311,45 +347,72 @@ def warn_if_gil_reenabled() -> None:
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", help="starting article title")
-    parser.add_argument("target", help="article title to reach")
-    parser.add_argument("--db", default=None,
-                        help="link database (default: test.db with --test, else simplewiki.db)")
-    parser.add_argument("--max-depth", type=int, default=10,
+def build_parser() -> argparse.ArgumentParser:
+    """One subcommand per scenario, so each carries only its own options."""
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("source", help="starting article title")
+    common.add_argument("target", help="article title to reach")
+    common.add_argument("--db", default=None,
+                        help="link store to use (default: picked by the scenario)")
+    common.add_argument("--max-depth", type=int, default=10,
                         help="maximum path length in links (default: 10)")
-    parser.add_argument("--max-pages", type=int, default=None,
+    common.add_argument("--max-pages", type=int, default=None,
                         help="stop after expanding this many pages")
-    parser.add_argument("--test", action="store_true",
-                        help="crawl the synthetic wiki instead of reading a loaded one")
-    parser.add_argument("-v", "--verbose", action="store_true",
+    common.add_argument("-v", "--verbose", action="store_true",
                         help="log every page expanded, fetched and stored")
-    parser.add_argument("-q", "--quiet", action="store_true",
-                        help="suppress the step-by-step log in test mode")
-    args = parser.parse_args()
 
-    # Test mode exists to be watched, so it narrates by default. -v adds the
-    # per-page detail; -q silences it.
-    if args.verbose:
-        level = logging.DEBUG
-    elif args.test and not args.quiet:
-        level = logging.INFO
-    else:
-        level = logging.WARNING
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=" ",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    scenarios = parser.add_subparsers(dest="mode", required=True, metavar="SCENARIO")
 
+    for name, mode in MODES.items():
+        sub = scenarios.add_parser(
+            name, parents=[common], help=mode.summary,
+            description=f"{name}: {mode.summary}\n\nUses the {mode.store} store.",
+            epilog=" ", formatter_class=argparse.RawTextHelpFormatter,
+        )
+        if name != "test":
+            sub.add_argument("--batch-size", type=int, default=WALK_BATCH_SIZE,
+                             help="pages read or fetched per round "
+                                  f"(default: {WALK_BATCH_SIZE})")
+        if mode.fetcher is wikifetcher.HttpFetcher:
+            sub.add_argument("--max-concurrency", type=int, default=MAX_CONCURRENCY,
+                             help=f"requests in flight at once (default: {MAX_CONCURRENCY})")
+            sub.add_argument("--max-rps", type=float,
+                             default=1.0 / MIN_REQUEST_INTERVAL_S,
+                             help="requests per second, 0 for no limit "
+                                  f"(default: {1.0 / MIN_REQUEST_INTERVAL_S:g})")
+
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    mode = MODES[args.mode]
+
+    level = logging.DEBUG if args.verbose else logging.WARNING
     logging.basicConfig(level=level, format="%(name)-19s %(message)s", stream=sys.stderr)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
+    for noisy in ("asyncio", "httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     # Typed titles become canonical titles here. Past this point nothing knows the
     # graph is a wiki.
     source, target = wikifetcher.canonical(args.source), wikifetcher.canonical(args.target)
 
-    store_name = args.db or ("test" if args.test else "simplewiki")
+    store_name = args.db or mode.store
+    max_pages = args.max_pages if args.max_pages is not None else mode.page_budget
 
-    fetcher = wikifetcher.LocalFetcher if args.test else None
+    fetcher = mode.fetcher
+    if fetcher is wikifetcher.HttpFetcher:
+        interval = 1.0 / args.max_rps if args.max_rps > 0 else 0.0
+        fetcher = functools.partial(wikifetcher.HttpFetcher, min_interval_s=interval)
 
-    with LinkStore(store_name, fetcher) as store:
+    concurrency = getattr(args, "max_concurrency", MAX_CONCURRENCY)
+
+    with LinkStore(store_name, fetcher, concurrency=concurrency) as store:
         if fetcher is None and store.page_count() == 0:
             sys.exit(
                 f"{store_name} is empty — populate it first:\n"
@@ -360,10 +423,11 @@ def main() -> None:
         # right host rather than an assumed one.
         site = store.site or wikifetcher.DEFAULT_SITE
 
-        result = Walker(store).find_path(
+        batch_size = getattr(args, "batch_size", WALK_BATCH_SIZE)
+        result = Walker(store, batch_size=batch_size).find_path(
             source, target,
             max_depth=args.max_depth,
-            max_pages=args.max_pages,
+            max_pages=max_pages,
         )
 
     notes = endpoint_notes(result, source, target, site)

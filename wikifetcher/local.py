@@ -21,8 +21,9 @@ class LocalFetcher:
 
     site = sample_wiki.SITE
 
-    def __init__(self, *, delay_s: float = 0.0) -> None:
-        # A delay makes concurrency visible in the logs; zero by default.
+    def __init__(self, site: str | None = None, *, delay_s: float = 0.0) -> None:
+        # `site` is accepted so every fetcher constructs alike; this one
+        # only ever serves the sample wiki.
         self._delay_s = delay_s
         self.calls = 0
 

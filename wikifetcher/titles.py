@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from urllib.parse import quote, unquote
 
-DEFAULT_SITE = "en.wikipedia.org"
+from settings import DEFAULT_SITE
 
 # Namespaces that are not articles. Matched against the prefix before the first
 # colon — not a blunt "contains a colon" test, since real articles have one

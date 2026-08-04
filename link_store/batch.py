@@ -7,13 +7,12 @@ from collections.abc import Iterator, Mapping
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
+from settings import FETCH_TIMEOUT_S
+
 if TYPE_CHECKING:
     from .store import LinkStore
 
 log = logging.getLogger(__name__)
-
-# How long to wait for one page before giving up on it.
-FETCH_TIMEOUT_S = 30.0
 
 # Returned by `get` for a title the store cannot account for. Distinct from
 # None, which means the title is known to have no article.
