@@ -268,7 +268,7 @@ def build(db_path: str, *, keep_staging: bool = False) -> None:
     with LinkDatabase(db_path) as store:
         store.build_from_staging(MAIN_NAMESPACE)
 
-    counted = "SELECT COUNT(*) FROM pages WHERE type = ?"
+    counted = "SELECT COUNT(*) FROM pages WHERE page_type = ?"
     pages = conn.execute(counted, (PageType.ARTICLE,)).fetchone()[0]
     missing = conn.execute(counted, (PageType.NOTFOUND,)).fetchone()[0]
     redirects = conn.execute(counted, (PageType.REDIRECT,)).fetchone()[0]

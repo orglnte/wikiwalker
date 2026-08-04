@@ -79,6 +79,6 @@ def _some_titles(wiki: LinkStore) -> list[str]:
     return [
         title
         for (title,) in wiki._db._conn.execute(
-            "SELECT title FROM pages WHERE type = 'article' LIMIT 200"
+            "SELECT title FROM pages WHERE page_type = 'article' LIMIT 200"
         )
     ]

@@ -26,7 +26,7 @@ class PageType(StrEnum):
     NOTFOUND = "notfound"
 
 
-_TYPE_VALUES = ", ".join(f"'{type}'" for type in PageType)
+_TYPE_VALUES = ", ".join(f"'{page_type}'" for page_type in PageType)
 
 SCHEMA = f"""
 -- Holds `site`: the same title names different articles on different wikis, so
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS pages (
     title       TEXT PRIMARY KEY,
     fetched_at  REAL NOT NULL,
     etag        TEXT,          -- for conditional GETs when refreshing
-    type      TEXT NOT NULL CHECK (type IN ({_TYPE_VALUES})),
+    page_type   TEXT NOT NULL CHECK (page_type IN ({_TYPE_VALUES})),
 
     -- Set only on 'redirect', and followed exactly one hop, as a wiki does.
     -- A redirect naming a redirect is served as that page, not followed on.
@@ -122,7 +122,7 @@ class LinkDatabase:
         for batch in _batches(wanted, _PARAM_BATCH):
             placeholders = ",".join("?" * len(batch))
             for title, page_type, destination in self._conn.execute(
-                f"SELECT title, type, redirect_to FROM pages WHERE title IN ({placeholders})",
+                f"SELECT title, page_type, redirect_to FROM pages WHERE title IN ({placeholders})",
                 batch,
             ):
                 if page_type == PageType.REDIRECT and destination:
@@ -140,7 +140,7 @@ class LinkDatabase:
         for batch in _batches(sorted(set(answers.values()) - set(found)), _PARAM_BATCH):
             placeholders = ",".join("?" * len(batch))
             for title, page_type, destination in self._conn.execute(
-                f"SELECT title, type, redirect_to FROM pages WHERE title IN ({placeholders})",
+                f"SELECT title, page_type, redirect_to FROM pages WHERE title IN ({placeholders})",
                 batch,
             ):
                 if page_type == PageType.REDIRECT:
@@ -169,13 +169,13 @@ class LinkDatabase:
     ) -> list[str]:
         """Return the known titles whose record is older than `max_age_s`.
 
-        `type` narrows the check to one kind: an article and a title that
+        `page_type` narrows the check to one kind: an article and a title that
         404s get different lifetimes (see `NOT_FOUND_TTL_S`).
         """
         cutoff = time.time() - max_age_s
         stale: list[str] = []
 
-        clause = " AND type = ?" if page_type else ""
+        clause = " AND page_type = ?" if page_type else ""
         extra = [page_type] if page_type else []
 
         for batch in _batches(list(titles), _PARAM_BATCH):
@@ -207,7 +207,7 @@ class LinkDatabase:
                 title
                 for (title,) in self._conn.execute(
                     f"SELECT title FROM pages "
-                    f"WHERE type = ? AND title IN ({placeholders})",
+                    f"WHERE page_type = ? AND title IN ({placeholders})",
                     [PageType.NOTFOUND, *batch],
                 )
             )
@@ -220,13 +220,13 @@ class LinkDatabase:
         Single-title counterpart to the batch methods, for a search's endpoints.
         """
         row = self._conn.execute(
-            "SELECT type FROM pages WHERE title = ?", (title,)
+            "SELECT page_type FROM pages WHERE title = ?", (title,)
         ).fetchone()
         return PageType(row[0]) if row else None
 
     def not_found_count(self) -> int:
         return self._conn.execute(
-            "SELECT COUNT(*) FROM pages WHERE type = ?", (PageType.NOTFOUND,)
+            "SELECT COUNT(*) FROM pages WHERE page_type = ?", (PageType.NOTFOUND,)
         ).fetchone()[0]
 
     def store(self, title: str, links: list[str], etag: str | None = None) -> None:
@@ -237,7 +237,7 @@ class LinkDatabase:
         """
         with self._conn:
             self._conn.execute(
-                "INSERT OR REPLACE INTO pages (title, fetched_at, etag, type) "
+                "INSERT OR REPLACE INTO pages (title, fetched_at, etag, page_type) "
                 "VALUES (?, ?, ?, ?)",
                 (title, time.time(), etag, PageType.ARTICLE),
             )
@@ -271,12 +271,12 @@ class LinkDatabase:
         with self._conn:
             self._conn.executemany("DELETE FROM links WHERE src = ?", replaced)
             self._conn.executemany(
-                "INSERT OR REPLACE INTO pages (title, fetched_at, etag, type) "
+                "INSERT OR REPLACE INTO pages (title, fetched_at, etag, page_type) "
                 "VALUES (?, ?, NULL, ?)",
                 [(title, at, PageType.ARTICLE) for title, at in articles],
             )
             self._conn.executemany(
-                "INSERT OR REPLACE INTO pages (title, fetched_at, etag, type) "
+                "INSERT OR REPLACE INTO pages (title, fetched_at, etag, page_type) "
                 "VALUES (?, ?, NULL, ?)",
                 [(title, at, PageType.NOTFOUND) for title, at in dead],
             )
@@ -315,12 +315,12 @@ class LinkDatabase:
 
                 -- Every article, including ones linking nowhere: a snapshot is
                 -- complete by construction, so no links is knowledge.
-                INSERT INTO pages (title, fetched_at, etag, type)
+                INSERT INTO pages (title, fetched_at, etag, page_type)
                 SELECT page_title, strftime('%s', 'now'), NULL, '{PageType.ARTICLE}'
                 FROM t_page
                 WHERE page_namespace = '{namespace}' AND page_is_redirect = '0';
 
-                INSERT OR REPLACE INTO pages (title, fetched_at, etag, type, redirect_to)
+                INSERT OR REPLACE INTO pages (title, fetched_at, etag, page_type, redirect_to)
                 SELECT p.page_title, strftime('%s', 'now'), NULL,
                        '{PageType.REDIRECT}', r.rd_title
                 FROM t_page p
@@ -331,7 +331,7 @@ class LinkDatabase:
                 -- Titles linked to that have no page of their own. They
                 -- outnumber articles several times over; without them the
                 -- search cannot tell "no such article" from "not looked at yet".
-                INSERT OR IGNORE INTO pages (title, fetched_at, etag, type)
+                INSERT OR IGNORE INTO pages (title, fetched_at, etag, page_type)
                 SELECT DISTINCT t.title, strftime('%s', 'now'), NULL, '{PageType.NOTFOUND}'
                 FROM t_target t
                 WHERE t.title NOT IN (SELECT title FROM pages);
@@ -349,7 +349,7 @@ class LinkDatabase:
             for alias in aliases:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO pages "
-                    "(title, fetched_at, etag, type, redirect_to) VALUES (?, ?, NULL, ?, ?)",
+                    "(title, fetched_at, etag, page_type, redirect_to) VALUES (?, ?, NULL, ?, ?)",
                     (alias, now, PageType.REDIRECT, destination),
                 )
                 self._conn.execute("DELETE FROM links WHERE src = ?", (alias,))
@@ -357,7 +357,7 @@ class LinkDatabase:
     def destination(self, title: str) -> str | None:
         """What this title redirects to, or None if it is not a redirect."""
         row = self._conn.execute(
-            "SELECT redirect_to FROM pages WHERE title = ? AND type = ?",
+            "SELECT redirect_to FROM pages WHERE title = ? AND page_type = ?",
             (title, PageType.REDIRECT),
         ).fetchone()
         return row[0] if row else None
@@ -372,7 +372,7 @@ class LinkDatabase:
         with self._conn:
             for title in titles:
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO pages (title, fetched_at, etag, type) "
+                    "INSERT OR REPLACE INTO pages (title, fetched_at, etag, page_type) "
                     "VALUES (?, ?, NULL, ?)",
                     (title, now, PageType.NOTFOUND),
                 )
@@ -403,7 +403,7 @@ class LinkDatabase:
     def page_count(self) -> int:
         """Number of real articles. Red links are known titles, not articles."""
         return self._conn.execute(
-            "SELECT COUNT(*) FROM pages WHERE type = ?", (PageType.ARTICLE,)
+            "SELECT COUNT(*) FROM pages WHERE page_type = ?", (PageType.ARTICLE,)
         ).fetchone()[0]
 
     def link_count(self) -> int:

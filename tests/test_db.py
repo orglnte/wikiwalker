@@ -62,7 +62,7 @@ def test_a_row_cannot_carry_a_type_outside_the_three(sql: LinkDatabase) -> None:
     for bad in ("unknown", "hello there"):
         with pytest.raises(sqlite3.IntegrityError):
             sql._conn.execute(
-                "INSERT INTO pages (title, fetched_at, type) VALUES (?, ?, ?)",
+                "INSERT INTO pages (title, fetched_at, page_type) VALUES (?, ?, ?)",
                 ("Somewhere", 0.0, bad),
             )
 

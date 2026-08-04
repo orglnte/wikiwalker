@@ -55,12 +55,10 @@ def main() -> None:
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
         rows = conn.execute(MOST_LINKED, (args.n,)).fetchall()
 
-        # `pages.type` holds what a title turned out to be, so it reads as a
-        # type here.
         kind = {
             title: page_type
             for title, page_type in conn.execute(
-                "SELECT title, type FROM pages WHERE title IN "
+                "SELECT title, page_type FROM pages WHERE title IN "
                 f"({','.join('?' * len(rows))})",
                 [target for target, _ in rows],
             )
