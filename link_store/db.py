@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS pages (
 CREATE TABLE IF NOT EXISTS links (
     src TEXT NOT NULL,
     dst TEXT NOT NULL,
-    ord INTEGER NOT NULL,     -- position on the page, so ordering is stable
+    ord INTEGER NOT NULL,     -- links are stored sorted, so ordering is stable
     PRIMARY KEY (src, ord)
 );
 
@@ -245,7 +245,7 @@ class LinkDatabase:
             self._conn.execute("DELETE FROM links WHERE src = ?", (title,))
             self._conn.executemany(
                 "INSERT INTO links (src, dst, ord) VALUES (?, ?, ?)",
-                [(title, dst, i) for i, dst in enumerate(links)],
+                [(title, dst, i) for i, dst in enumerate(sorted(links))],
             )
 
     def bulk_write(self, pages: Iterable[tuple[str, list[str] | None]]) -> tuple[int, int]:
@@ -266,7 +266,7 @@ class LinkDatabase:
                 dead.append((title, now))
             else:
                 articles.append((title, now))
-                edges.extend((title, dst, i) for i, dst in enumerate(links))
+                edges.extend((title, dst, i) for i, dst in enumerate(sorted(links)))
 
         with self._conn:
             self._conn.executemany("DELETE FROM links WHERE src = ?", replaced)

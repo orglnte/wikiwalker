@@ -215,12 +215,13 @@ def test_counts_separate_articles_from_missing_titles(sql: LinkDatabase) -> None
 # Link storage
 # --------------------------------------------------------------------------
 
-def test_links_come_back_in_page_order(sql: LinkDatabase) -> None:
-    """Order is stable so two runs over the same data return the same path."""
-    order = ["Zebra", "Apple", "Mango"]
-    sql.store("Page", order)
+def test_links_come_back_sorted(sql: LinkDatabase) -> None:
+    """A dump has no page positions to give, only a set of links, so both ways
+    of filling the store sort them — otherwise the same wiki read two ways
+    answers with different paths of the same length."""
+    sql.store("Page", ["Zebra", "Apple", "Mango"])
 
-    assert sql.get_links(["Page"])["Page"] == order
+    assert sql.get_links(["Page"])["Page"] == ["Apple", "Mango", "Zebra"]
 
 
 def test_restoring_a_page_replaces_its_links_rather_than_appending(sql: LinkDatabase) -> None:
@@ -241,7 +242,7 @@ def test_a_page_can_link_to_the_same_title_twice(sql: LinkDatabase) -> None:
     """
     sql.store("Page", ["Same", "Other", "Same"])
 
-    assert sql.get_links(["Page"])["Page"] == ["Same", "Other", "Same"]
+    assert sql.get_links(["Page"])["Page"] == ["Other", "Same", "Same"]
 
 
 # --------------------------------------------------------------------------
