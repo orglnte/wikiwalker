@@ -189,9 +189,11 @@ def test_unknown_endpoints_have_no_status(db: LinkDatabase) -> None:
     assert result.target_status is None
 
 
-def test_notes_explain_a_red_link_target_without_calling_it_a_failure(
+def test_notes_explain_a_target_with_no_article_without_calling_it_a_failure(
     db: LinkDatabase,
 ) -> None:
+    """And without claiming anything links to it. A 404 says an article is
+    missing; only a page that carries the link says somebody points at it."""
     db.store("Source", ["Nowhere"])
     db.mark_red_links(["Nowhere"])
     result = Walker(db).find_path("Source", "Nowhere")
@@ -199,7 +201,8 @@ def test_notes_explain_a_red_link_target_without_calling_it_a_failure(
     notes = endpoint_notes(result, "Source", "Nowhere", "simple.wikipedia.org")
 
     assert len(notes) == 1
-    assert "red link" in notes[0]
+    assert "no article" in notes[0]
+    assert "link to it" not in notes[0]
 
 
 def test_notes_name_which_endpoint_is_unknown(db: LinkDatabase) -> None:

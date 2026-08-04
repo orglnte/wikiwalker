@@ -5,10 +5,10 @@ Finds the shortest path between two Wikipedia articles by following internal lin
 ## Setup
 
 ```bash
-mkvirtualenv wikiwalker -a "$PWD" -p /opt/local/bin/python3.14t
+mkvirtualenv wikiwalker -a "$PWD" -p /opt/local/bin/python3.14
 pip install -e ".[dev]"
 pytest
-pytest -m live   # 70s, runs the fetcher links retrieval test vs API results
+pytest -m live   # 35s at 10rps, runs the fetcher links retrieval test vs API results
 ```
 
 ```bash
@@ -169,11 +169,8 @@ it divergence is <= 0.75% (pytest -m live).
 
 ## TODO
 
-3. Whether 1 req/s clears Wikimedia's limits for `/wiki/` HTML. It comes from
-   their general guidance, not a published number. On a 429, link to the policy.
 2. Redirect resolution emits duplicate edges — inflates `link_count()`, would
    skew most-frequent counts.
-
 
     def __iter__(self) -> Iterator[str]:
         self.drain()
@@ -181,5 +178,10 @@ it divergence is <= 0.75% (pytest -m live).
 
 
 + test wikipedia walk, con opzioni per rps / concurrency
+
++ check sequence log
+
++ topK  shortest paths
+        article names
 
 

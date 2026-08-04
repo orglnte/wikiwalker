@@ -94,6 +94,9 @@ class WalkResult:
     source_status: str | None = None
     target_status: str | None = None
 
+    # Why an endpoint could not be read, when something went wrong reading it.
+    failures: dict[str, str] = field(default_factory=dict)
+
     @property
     def found(self) -> bool:
         return self.path is not None
@@ -127,14 +130,20 @@ class Walker:
         be an article. The target only needs to be linked to, so a red link is
         reachable.
         """
-        log.info("check endpoints: %s, %s "
-         "(source must be an article, target must be known)", source, target)
+        log.info("check endpoints: %s, %s (source must be an article)", source, target)
         source_status = self._store.status(source)
         target_status = self._store.status(target)
+        store_failures = getattr(self._store, "failures", {})
+        endpoint_failures = {
+            t: store_failures[t] for t in (source, target) if t in store_failures
+        }
         states = {}
         for title in (source, target):
             states[title] = self._store.state(title)
-            log.info("    %s is %s (%s)", title, states[title], STATE_MEANING[states[title]])
+            # A read that failed is not the same as one never attempted, and
+            # `unknown` covers both.
+            why = endpoint_failures.get(title) or STATE_MEANING[states[title]]
+            log.info("    %s is %s (%s)", title, states[title], why)
 
         if source == target and source_status is not None:
             return WalkResult(
@@ -152,13 +161,14 @@ class Walker:
             return WalkResult(
                 None, 0, 0, not unknown, unread=unknown,
                 source_status=source_status, target_status=target_status,
-                target_state=states[target],
+                target_state=states[target], failures=endpoint_failures,
             )
 
         result = self._search(source, target, max_depth=max_depth, max_walked=max_walked)
         result.source_status = source_status
         result.target_status = target_status
         result.target_state = states[target]
+        result.failures = endpoint_failures
         return result
 
     def _search(
@@ -255,7 +265,7 @@ class Walker:
                         if link == target:
                             log.info("    %s links to %s — found", page, target)
                             return WalkResult(
-                                # NOTE reverts the path so it's source -> target
+                                # NOTE extracts the path from source to target
                                 _reconstruct(parent, target),
                                 depth + 1,
                                 expanded,
@@ -296,8 +306,23 @@ class Walker:
         )
 
 def _reconstruct(parent: dict[str, str | None], target: str) -> list[str]:
-    """Walk the parent chain from `target` back to the source, then reverse it."""
-    # TODO examples
+    """Walk the parent chain from `target` back to the source, then reverse it.
+
+    `parent` holds every page discovered so far.
+
+        parent = {
+            "L0": None,
+            "L1_00": "L0",    "L1_01": "L0",    "L1_02": "L0",
+            "L2_00": "L1_00", "L2_01": "L1_00", "L2_02": "L1_00",
+            "L3_26": "L1_00",
+        }
+
+    `_reconstruct(parent, "L3_26")` then returns:
+
+        ["L0", "L1_00", "L3_26"]
+
+    Only the source maps to None, so None stops the loop.
+    """
     path = [target]
     page = parent[target]
     while page is not None:
@@ -329,26 +354,30 @@ def endpoint_notes(result: WalkResult, source: str, target: str, site: str) -> l
     notes: list[str] = []
 
     if result.source_status is None:
+        why = result.failures.get(source)
         notes.append(
-            f"{wikifetcher.to_name(source)} is not in the database — check the spelling, "
-            f"or it may not exist on {site}."
+            f"{wikifetcher.to_name(source)} could not be read"
+            + (f" ({why})." if why else ".")
         )
     elif result.source_status == "redlink":
         notes.append(
-            f"{wikifetcher.to_name(source)} has no article on {site}: other pages link to it, "
-            f"but there is nothing to link out from, so no path can start here."
+            f"{wikifetcher.to_name(source)} has no article on {site}, so there is nothing "
+            f"to link out from and no path can start here."
         )
 
     if result.target_status is None:
+        why = result.failures.get(target)
         notes.append(
-            f"{wikifetcher.to_name(target)} is not in the database — check the spelling, "
-            f"or it may not exist on {site}. Nothing links to it, so nothing can reach it."
+            f"{wikifetcher.to_name(target)} could not be read"
+            + (f" ({why})." if why else ".")
+            + " It may well have no article behind it, which is a target the"
+            " walk accepts — pages can link to a title nobody has written."
         )
     elif result.target_status == "redlink":
-        # Not an error: a red link is still a valid link target.
+        # Not an error: a title with no article behind it is still a link target.
         notes.append(
-            f"{wikifetcher.to_name(target)} is a red link on {site}: pages link to it, "
-            f"but no article exists. It can be reached, never departed from."
+            f"{wikifetcher.to_name(target)} has no article on {site}. Nothing leads out of "
+            f"it, but a page linking to it would still reach it."
         )
 
     return notes
@@ -468,6 +497,8 @@ def main() -> None:
             max_depth=args.max_depth,
             max_walked=args.max_walked_pages,
         )
+        budget_spent = store.budget_spent
+        fetched = store.fetched
 
     notes = endpoint_notes(result, source, target, site)
 
@@ -506,9 +537,25 @@ def main() -> None:
         )
         print(f"WARNING: search was not exhaustive ({cause}) — {caveat}.", file=sys.stderr)
 
+    if budget_spent:
+        # Says which limit ended the crawl. Without it an exhausted budget looks
+        # like a graph that ran out, since both leave the frontier empty.
+        print(
+            f"NOTE: the fetch budget of {fetched:,} page(s) was exhausted."
+            " Raise --max-fetched-pages to search further; what was fetched is kept,"
+            " so the next run carries on from it.",
+            file=sys.stderr,
+        )
+
     warn_if_gil_reenabled()
     sys.exit(0 if result.found else 1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Every page the crawl read is already written, so the next run resumes
+        # from it. 130 is what a shell expects from a process killed by SIGINT.
+        print("\nInterrupted. Pages already fetched are kept.", file=sys.stderr)
+        sys.exit(130)

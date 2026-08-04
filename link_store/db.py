@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 -- A row means the title is known: 'ok' = article, its edges are in `links`;
--- 'redlink' = linked to, but no article exists. Those are the only two values
+-- 'redlink' = the title was checked and no article exists. Those are the values
 -- a row can carry. Never fetched has no row at all, which is what recording
 -- red links keeps distinct from a dead end.
 CREATE TABLE IF NOT EXISTS pages (
