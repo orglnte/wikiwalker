@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 
 import wikifetcher
-from link_store import DB_FILE, LinkDatabase, PageStatus
+from link_store import DB_FILE, LinkDatabase, PageType
 from settings import DUMPS_URL as BASE_URL
 from wikifetcher import sample_wiki
 
@@ -268,10 +268,10 @@ def build(db_path: str, *, keep_staging: bool = False) -> None:
     with LinkDatabase(db_path) as store:
         store.build_from_staging(MAIN_NAMESPACE)
 
-    counted = "SELECT COUNT(*) FROM pages WHERE status = ?"
-    pages = conn.execute(counted, (PageStatus.ARTICLE,)).fetchone()[0]
-    missing = conn.execute(counted, (PageStatus.NOTFOUND,)).fetchone()[0]
-    redirects = conn.execute(counted, (PageStatus.REDIRECT,)).fetchone()[0]
+    counted = "SELECT COUNT(*) FROM pages WHERE type = ?"
+    pages = conn.execute(counted, (PageType.ARTICLE,)).fetchone()[0]
+    missing = conn.execute(counted, (PageType.NOTFOUND,)).fetchone()[0]
+    redirects = conn.execute(counted, (PageType.REDIRECT,)).fetchone()[0]
     links = conn.execute("SELECT COUNT(*) FROM links").fetchone()[0]
 
     if keep_staging:

@@ -5,20 +5,19 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable
 
-import logctx
 import wikifetcher
-from settings import DB_FILE, FETCH_TIMEOUT_S, NOT_FOUND_TTL_S, SITE
+from settings import DB_FILE, FETCH_TIMEOUT_S, SITE
 
-from .batch import BatchLinks
-from .db import LinkDatabase, PageStatus
+from .batch import MISSING, PAGE_FETCH_FAILED, BatchLinks, Entry
+from .db import LinkDatabase, PageType
 from .fetcher import LinkFetcher
 
 log = logging.getLogger(__name__)
 
-# Stored status -> what it means. Absent from the store is a state too.
+# Stored type -> what it means. Absent from the store is a state too.
 STATE = {
-    PageStatus.ARTICLE: "article",
-    PageStatus.NOTFOUND: "notfound",
+    PageType.ARTICLE: "article",
+    PageType.NOTFOUND: "notfound",
     None: "unknown",
 }
 
@@ -54,7 +53,7 @@ class LinkStore:
             if fetcher is not None
             else None
         )
-        self._open: BatchLinks | None = None
+        self._batchlinks: BatchLinks | None = None
 
         # A fetcher decides which wiki this store holds; a loaded one already
         # knows.
@@ -79,49 +78,50 @@ class LinkStore:
     def page_count(self) -> int:
         return self._db.page_count()
 
-    def get_links(self, titles: Iterable[str]) -> BatchLinks:
-        """Links for these titles. Ones not held yet are retrieved."""
+    def open_batch(self, titles: Iterable[str]) -> None:
+        """Read what is held for these titles and start retrieving the rest."""
         # Anything still outstanding from the previous batch is worth keeping.
-        if self._open is not None:
-            self._open.drain()
+        if self._batchlinks is not None:
+            self._absorb(self._batchlinks.drain())
 
-        wanted = list(dict.fromkeys(titles))
-        known = self._db.get_links(wanted)
+        allowance = (
+            None if self._max_fetched is None
+            else max(0, self._max_fetched - self.fetched)
+        )
+        self._batchlinks = BatchLinks(titles, self._db, self._fetcher, allowance)
+        self.fetched += self._batchlinks.submitted
 
-        pending = {}
-        if self._fetcher is not None:
-            to_fetch = [t for t in wanted if t not in known]
+    def links_of(self, title: str) -> list[str] | None:
+        """The title's links. Blocks while it is still being retrieved.
 
-            # A missing title becomes an article only when somebody writes one,
-            # so these are worth another look but rarely.
-            stale = self._db.stale_titles(
-                [t for t, links in known.items() if links is None],
-                NOT_FOUND_TTL_S,
-                status=PageStatus.NOTFOUND,
-            )
-            to_fetch.extend(stale)
+        None means no article behind the title. PAGE_FETCH_FAILED means the
+        store has no answer, which is what makes a walk non-exhaustive.
+        """
+        entry = self._batchlinks.get(title)
 
-            # Whatever the budget will not cover stays absent, which the search
-            # already reads as "could not be read".
-            if self._max_fetched is not None:
-                allowed = max(0, self._max_fetched - self.fetched)
-                if len(to_fetch) > allowed:
-                    log.info(
-                        "    fetch budget %d reached: %d page(s) left unread",
-                        self._max_fetched, len(to_fetch) - allowed,
-                    )
-                    to_fetch = to_fetch[:allowed]
+        match entry.arrived:
+            case wikifetcher.Page() as page:
+                self.write(page)
+                return page.links
+            case wikifetcher.PageFetchFailed(reason=reason):
+                self.failures[title] = reason
+                return PAGE_FETCH_FAILED
 
-            log.info(
-                "    %sbatch of %d: %d held, %d to retrieve",
-                logctx.where(), len(wanted), len(known), len(to_fetch),
-            )
-            if to_fetch:
-                self.fetched += len(to_fetch)
-                pending = self._fetcher.submit(to_fetch)
+        if entry.held is MISSING:
+            # No reason recorded: every title in a spent batch has the same one,
+            # and only the two endpoints' reasons are ever read.
+            return PAGE_FETCH_FAILED
 
-        self._open = BatchLinks(self, known, pending)
-        return self._open
+        return entry.held
+
+    def _absorb(self, entries: dict[str, Entry]) -> None:
+        """Keep what a batch resolved that nobody read."""
+        for title, entry in entries.items():
+            match entry.arrived:
+                case wikifetcher.Page() as page:
+                    self.write(page)
+                case wikifetcher.PageFetchFailed(reason=reason):
+                    self.failures[title] = reason
 
     def fetch_page(self, title: str) -> list[str] | None:
         """Retrieve one page now and record what came back.
@@ -147,20 +147,20 @@ class LinkStore:
         self.write(page)
         return page.links
 
-    def status(self, title: str) -> PageStatus | None:
-        """The title's status, or None if it is unknown — retrieving first.
+    def page_type(self, title: str) -> PageType | None:
+        """The title's type, or None if it is unknown — retrieving first.
 
-        A redirect answers with its destination's status: it names that page,
+        A redirect answers with its destination's type: it names that page,
         and no caller outside this module has any use for the difference.
         """
-        known = self._db.status(title)
+        known = self._db.page_type(title)
         if known is None and self._fetcher is not None:
             self.fetch_page(title)
-            known = self._db.status(title)
+            known = self._db.page_type(title)
 
-        if known == PageStatus.REDIRECT:
+        if known == PageType.REDIRECT:
             destination = self._db.destination(title)
-            known = self._db.status(destination) if destination else None
+            known = self._db.page_type(destination) if destination else None
         return known
 
     def state(self, title: str) -> str:
@@ -170,7 +170,7 @@ class LinkStore:
         when some other page does. Whether a link to it is red depends on the
         pages that link to it, so it is not one of these.
         """
-        return STATE[self.status(title)]
+        return STATE[self.page_type(title)]
 
     def destination(self, title: str) -> str | None:
         """What this title redirects to, or None if it does not."""
@@ -228,8 +228,8 @@ class LinkStore:
         """Keep the pages that landed; do not wait for the ones queued behind
         them. The walk is over — by an answer, a budget or a Ctrl-C — so a page
         still waiting its turn has no reader left."""
-        if self._open is not None:
-            self._open.keep_what_landed()
+        if self._batchlinks is not None:
+            self._absorb(self._batchlinks.keep_what_landed())
         if self._fetcher is not None:
             self._fetcher.close()
         self._db.close()

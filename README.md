@@ -27,7 +27,7 @@ python walker.py crawl --help
 | `read-only` | `simplewiki.db` | never fetches; needs `data_cli` to import the dump first |
 | `crawl` | `wikipedia-us.db` | fetches what is missing over HTTP |
 
-`test` and `read-only` are testing scenarios.
+`test` and `read-only` are testing scenarios. simplewiki is simple.wikipedia.org archive.
 
 ## Examples
 
@@ -71,8 +71,8 @@ python3 walker.py crawl --db simplewiki Bristol Cheese -v > run_2.log 2>&1
 diff run_1.log run_2.log
 ```
 
-Probably there is a difference in total links for the page forgotten and then re-crawled
-since the first one is from a past snapshot.
+Probably you will observe a difference in total links for the page forgotten
+and then re-crawled since the first count is upon a snapshot from the past.
 
 ### Crawling live Wikipedia
 
@@ -96,10 +96,14 @@ and none of that complexity reaches the `Walker`. The db is also what lets a
 walk stop and restart, or recover from a crash or a network outage. By definition,
 the walk is over "stratified" data (layered in time).
 
-`LinkStore.get_links` returns a `BatchLinks` object: one mapping over the pages
-the store already holds and the ones still arriving, so the `Walker` iterates it
-synchronously. Reading a page that has not landed blocks until it has, which
-keeps the BFS loop free of any notion of fetching.
+`LinkStore.open_batch` builds a `BatchLinks` over the pages the store already
+holds and the ones still arriving; `LinkStore.links_of` reads one title out of
+it, so the `Walker` stays synchronous. Reading a page that has not landed blocks
+until it has, which keeps the BFS loop free of any notion of fetching.
+
+`BatchLinks` only reads. It answers with what the db held and what the fetcher
+returned, and the store decides what to keep — so nothing but `LinkStore`
+writes.
 
 A page in the store is one of:
 
@@ -131,9 +135,11 @@ simple.wikipedia.org has been added to facilitate tests (approx. 60 links per pa
 1. *Read skew*: a walk spans pages read at different instants, so the graph it traverses
     may never have existed as a whole.
 2. An article, once stored, is **never refreshed**. The only refresh rule covers
-   `notfound`, re-checked after 24h (`LinkStore.get_links`).
+   `notfound`, re-checked after 24h (`BatchLinks`).
 3. `BatchLinks.drain()` collects the pages of the current batch even if the batch iteration is
-    stopped. (*TODO impact on large batches*)
+    stopped. Closing the store uses `keep_what_landed()` instead, which keeps what
+    has arrived and cancels the rest — most of a batch is still queued behind the
+    concurrency cap, so waiting would start requests nobody will read.
 
 
 ### Fetcher
@@ -182,19 +188,10 @@ it divergence is <= 0.75% (pytest -m live).
 
 ## TODO
 
-
-+ wtf
-
-    def __iter__(self) -> Iterator[str]:
-        self.drain()
-        return iter(self._known)
-
-
-+ topK  article names
-
-+ topK  shortest paths
-
-+ add supporto per multi paths
++ add support multi paths
     Top 5 shortest paths - refers to the first 5 found shortest paths between a source and a target
 
++ There are still some layers of AI-powered spaghetti code, since there is no way to pass a high level
+  design so that an agent can do it withour inventing funny stuff. I stopped digging into those
+  spaghetti to put a limit on the time spent, reviewing the design until LinkStore.links_of and BatchLinks.
 

@@ -14,7 +14,7 @@ from concurrent.futures import Future
 
 import pytest
 
-from link_store import BatchLinks, LinkFetcher, LinkStore
+from link_store import PAGE_FETCH_FAILED, LinkFetcher, LinkStore
 from walker import Walker
 from wikifetcher import Page
 
@@ -50,6 +50,12 @@ class FakeFetcher:
             self.in_flight -= 1
 
 
+def links_after(store, titles, title):
+    """Open a batch over `titles` and read one of them."""
+    store.open_batch(titles)
+    return store.links_of(title)
+
+
 def serving(pages, **kwargs):
     """A fetcher factory of the shape LinkStore constructs."""
     made = {}
@@ -69,9 +75,9 @@ def serving(pages, **kwargs):
 def test_a_page_the_store_lacks_is_fetched_and_kept() -> None:
     factory = serving({"A": ["B"]})
     with LinkStore(":memory:", factory) as store:
-        assert store.get_links(["A"]).get("A") == ["B"]
+        assert links_after(store, ["A"], "A") == ["B"]
         # asking again must not go out a second time
-        assert store.get_links(["A"]).get("A") == ["B"]
+        assert links_after(store, ["A"], "A") == ["B"]
 
     assert factory.made["fetcher"].requested == ["A"]
 
@@ -81,26 +87,24 @@ def test_a_page_already_held_is_not_fetched() -> None:
     with LinkStore(":memory:", factory) as store:
         store.store("A", ["B"])
 
-        assert store.get_links(["A"]).get("A") == ["B"]
+        assert links_after(store, ["A"], "A") == ["B"]
 
     assert factory.made["fetcher"].requested == []
 
 
 def test_a_title_with_no_article_is_recorded_as_not_found() -> None:
     with LinkStore(":memory:", serving({})) as store:
-        assert store.get_links(["Nowhere"]).get("Nowhere") is None
+        assert links_after(store, ["Nowhere"], "Nowhere") is None
         assert store.not_found_count() == 1
-        assert store.status("Nowhere") == "notfound"
+        assert store.page_type("Nowhere") == "notfound"
 
 
 def test_a_failed_fetch_is_not_recorded_as_anything() -> None:
     """It must stay unknown so the next walk retries it — and so the current
     walk reports itself as non-exhaustive rather than claiming a dead end."""
     with LinkStore(":memory:", serving({"A": ["B"]}, broken=["A"])) as store:
-        links = store.get_links(["A"])
-
-        assert "A" not in links
-        assert store.status("A") is None
+        assert links_after(store, ["A"], "A") is PAGE_FETCH_FAILED
+        assert store.page_type("A") is None
         assert store.not_found_count() == 0
 
 
@@ -114,11 +118,11 @@ def test_a_redirect_is_fetched_once_and_answers_under_both_names() -> None:
     factory = serving({"United_Kingdom": ["London"]}, redirects={"UK": "United_Kingdom"})
 
     with LinkStore(":memory:", factory) as store:
-        assert store.get_links(["UK"]).get("UK") == ["London"]
+        assert links_after(store, ["UK"], "UK") == ["London"]
 
         # Asking again goes nowhere near the network, under either name.
-        assert store.get_links(["UK"]).get("UK") == ["London"]
-        assert store.get_links(["United_Kingdom"]).get("United_Kingdom") == ["London"]
+        assert links_after(store, ["UK"], "UK") == ["London"]
+        assert links_after(store, ["United_Kingdom"], "United_Kingdom") == ["London"]
 
     assert factory.made["fetcher"].requested == ["UK"]
 
@@ -138,9 +142,9 @@ def test_a_redirect_reports_the_state_of_what_it_names() -> None:
 def test_pages_fetched_but_never_asked_for_are_still_kept() -> None:
     """A walk that ends early has already paid for those fetches."""
     with LinkStore(":memory:", serving({"A": ["X"], "B": ["Y"], "C": ["Z"]})) as store:
-        batch = store.get_links(["A", "B", "C"])
-        batch.get("A")            # only one is ever read
-        batch.drain()
+        store.open_batch(["A", "B", "C"])
+        store.links_of("A")       # only one is ever read
+        store.open_batch([])      # opening the next batch keeps the rest
 
         assert store.link_count() == 3
 
@@ -153,10 +157,12 @@ def test_closing_keeps_the_pages_that_landed_and_drops_the_queued() -> None:
     queued: Future = Future()
 
     with LinkStore(":memory:") as store:
-        BatchLinks(store, {}, {"Landed": landed, "Queued": queued}).keep_what_landed()
+        store.open_batch([])
+        store._batchlinks._pending = {"Landed": landed, "Queued": queued}
+        store._absorb(store._batchlinks.keep_what_landed())
 
-        assert store.get_links(["Landed"]).get("Landed") == ["X"]
-        assert store.status("Queued") is None
+        assert links_after(store, ["Landed"], "Landed") == ["X"]
+        assert store.page_type("Queued") is None
         assert queued.cancelled()
 
 
@@ -164,10 +170,10 @@ def test_a_batch_mixes_held_and_retrieved_pages() -> None:
     with LinkStore(":memory:", serving({"B": ["Y"]})) as store:
         store.store("A", ["X"])
 
-        links = store.get_links(["A", "B"])
+        store.open_batch(["A", "B"])
 
-        assert links.get("A") == ["X"]
-        assert links.get("B") == ["Y"]
+        assert store.links_of("A") == ["X"]
+        assert store.links_of("B") == ["Y"]
 
 
 # --------------------------------------------------------------------------
@@ -217,7 +223,7 @@ def test_a_page_that_cannot_be_read_makes_the_walk_non_exhaustive() -> None:
         result = Walker(store).find_path("A", "Target")
 
     assert result.path is None
-    assert "C" in result.unread
+    assert "C" in result.failed
     assert not result.complete
 
 
@@ -272,12 +278,12 @@ def test_a_forgotten_page_is_retrieved_again() -> None:
 
     with LinkStore(":memory:", factory) as store:
         store.bulk_write([("A", ["B"]), ("B", [])])
-        assert store.get_links(["A"]).get("A") == ["B"]
+        assert links_after(store, ["A"], "A") == ["B"]
         assert factory.made["fetcher"].requested == []
 
         store.forget("A")
 
-        assert store.get_links(["A"]).get("A") == ["B"]
+        assert links_after(store, ["A"], "A") == ["B"]
         assert factory.made["fetcher"].requested == ["A"]
 
 
@@ -291,5 +297,5 @@ def test_a_walk_over_a_hole_is_not_exhaustive() -> None:
         result = Walker(store).find_path("A", "Target")
 
     assert result.path is None
-    assert result.unread == {"B"}
+    assert result.failed == {"B"}
     assert not result.complete

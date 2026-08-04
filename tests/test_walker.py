@@ -77,7 +77,7 @@ def test_a_missing_title_does_not_make_a_search_incomplete(graph: LinkDatabase) 
     the result as doubtful on its account."""
     result = Walker(graph).find_path("Source", "Isolated")
 
-    assert "Nowhere" not in result.unread
+    assert "Nowhere" not in result.failed
 
 
 def test_a_page_we_never_fetched_does_make_a_search_incomplete(graph: LinkDatabase) -> None:
@@ -85,7 +85,7 @@ def test_a_page_we_never_fetched_does_make_a_search_incomplete(graph: LinkDataba
     it is unknown, so no claim of shortest-ness survives it."""
     result = Walker(graph).find_path("Source", "Isolated")
 
-    assert result.unread == {"Unfetched"}
+    assert result.failed == {"Unfetched"}
     assert not result.complete
 
 
@@ -101,7 +101,7 @@ def test_an_unreachable_target_is_reported_completely_when_nothing_is_absent(
     result = Walker(db).find_path("Source", "Marooned")
 
     assert result.path is None
-    assert result.unread == set()
+    assert result.failed == set()
     assert result.complete
 
 
@@ -111,7 +111,7 @@ def test_an_unknown_source_yields_no_path_and_an_incomplete_search(db: LinkDatab
     result = Walker(db).find_path("Ghost", "Somewhere")
 
     assert result.path is None
-    assert result.unread == {"Ghost"}
+    assert result.failed == {"Ghost"}
     assert not result.complete
 
 
@@ -129,7 +129,7 @@ def test_missing_titles_are_not_counted_as_pages_expanded(db: LinkDatabase) -> N
 
 
 # --------------------------------------------------------------------------
-# Endpoint status — the two ends are not symmetric
+# Endpoint type — the two ends are not symmetric
 # --------------------------------------------------------------------------
 
 def test_a_target_with_no_article_is_reachable(db: LinkDatabase) -> None:
@@ -141,7 +141,7 @@ def test_a_target_with_no_article_is_reachable(db: LinkDatabase) -> None:
     result = Walker(db).find_path("Source", "Nowhere")
 
     assert result.path == ["Source", "Nowhere"]
-    assert result.target_status == "notfound"
+    assert result.target_type == "notfound"
 
 
 def test_a_source_with_no_article_can_reach_nothing(db: LinkDatabase) -> None:
@@ -156,8 +156,8 @@ def test_a_source_with_no_article_can_reach_nothing(db: LinkDatabase) -> None:
     result = Walker(db).find_path("Nowhere", "Somewhere")
 
     assert result.path is None
-    assert result.source_status == "notfound"
-    assert result.unread == set()
+    assert result.source_type == "notfound"
+    assert result.failed == set()
     assert result.complete
 
 
@@ -176,8 +176,8 @@ def test_an_impossible_search_is_settled_without_walking_the_graph(db: LinkDatab
 def test_endpoint_status_is_reported_for_ordinary_articles(graph: LinkDatabase) -> None:
     result = Walker(graph).find_path("Source", "Target")
 
-    assert result.source_status == "article"
-    assert result.target_status == "article"
+    assert result.source_type == "article"
+    assert result.target_type == "article"
 
 
 def test_unknown_endpoints_have_no_status(db: LinkDatabase) -> None:
@@ -185,8 +185,8 @@ def test_unknown_endpoints_have_no_status(db: LinkDatabase) -> None:
 
     result = Walker(db).find_path("Ghost", "Phantom")
 
-    assert result.source_status is None
-    assert result.target_status is None
+    assert result.source_type is None
+    assert result.target_type is None
 
 
 def test_notes_explain_a_target_with_no_article_without_calling_it_a_failure(

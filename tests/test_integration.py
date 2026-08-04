@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from link_store import LinkStore
+from link_store import PAGE_FETCH_FAILED, LinkStore
 from walker import Walker
 
 WIKI_DB = Path(__file__).resolve().parent.parent / "simplewiki.db"
@@ -47,13 +47,13 @@ def test_the_load_produced_articles_links_and_missing_titles(wiki: LinkStore) ->
 def test_every_link_target_is_either_an_article_a_redirect_or_missing(wiki: LinkStore) -> None:
     """A target that is neither is a hole, and a search crossing one can no
     longer claim its answer is the shortest."""
-    sample = random.Random(0).sample(sorted(wiki.get_links(_some_titles(wiki))), 50)
-    targets = {
-        link for links in wiki.get_links(sample).values() if links for link in links
-    }
+    titles = _some_titles(wiki)
+    sample = random.Random(0).sample(sorted(titles), 50)
+    wiki.open_batch(sample)
+    targets = {link for title in sample for link in (wiki.links_of(title) or ())}
 
-    known = wiki.get_links(targets)
-    unexplained = sorted(t for t in targets if t not in known)
+    wiki.open_batch(targets)
+    unexplained = sorted(t for t in targets if wiki.links_of(t) is PAGE_FETCH_FAILED)
 
     assert unexplained == [], f"{len(unexplained)} unexplained targets, e.g. {unexplained[:5]}"
 
@@ -66,12 +66,12 @@ def test_a_known_search_returns_a_short_verified_path(wiki: LinkStore) -> None:
     assert result.path is not None
     assert result.path[0] == "April" and result.path[-1] == "Nigeria"
     assert result.depth_reached <= 3
-    assert result.complete, f"search hit {len(result.unread)} unread pages"
+    assert result.complete, f"search hit {len(result.failed)} unread pages"
 
-    links = wiki.get_links(result.path[:-1])
+    wiki.open_batch(result.path[:-1])
     pairs = zip(result.path, result.path[1:], strict=False)
     for step, (src, dst) in enumerate(pairs, start=1):
-        assert dst in links[src], f"step {step}: {src} does not link to {dst}"
+        assert dst in (wiki.links_of(src) or ()), f"step {step}: {src} does not link to {dst}"
 
 
 def _some_titles(wiki: LinkStore) -> list[str]:
@@ -79,6 +79,6 @@ def _some_titles(wiki: LinkStore) -> list[str]:
     return [
         title
         for (title,) in wiki._db._conn.execute(
-            "SELECT title FROM pages WHERE status = 'article' LIMIT 200"
+            "SELECT title FROM pages WHERE type = 'article' LIMIT 200"
         )
     ]

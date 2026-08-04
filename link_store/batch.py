@@ -1,98 +1,149 @@
-"""The links for one batch of titles, some of which may still be arriving."""
+"""The links for one batch of titles, some of which may still be arriving.
+
+Reads. Never writes — what it resolves is handed back for the store to keep.
+"""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import Any
 
-from settings import FETCH_TIMEOUT_S
+import logctx
+import wikifetcher
+from settings import FETCH_TIMEOUT_S, NOT_FOUND_TTL_S
 
-if TYPE_CHECKING:
-    from .store import LinkStore
+from .db import LinkDatabase, PageType
+from .fetcher import LinkFetcher
 
 log = logging.getLogger(__name__)
 
-# Returned by `get` for a title the store cannot account for. Distinct from
-# None, which means the title is known to have no article.
-UNKNOWN: Any = object()
+# The db had no row for this title. Distinct from None, which means the db
+# holds the title and knows there is no article behind it.
+MISSING: Any = object()
+
+# Returned instead of links when the store has no answer at all: never fetched,
+# a failed retrieval, or a budget that ran out.
+PAGE_FETCH_FAILED: Any = object()
 
 
-class BatchLinks(Mapping[str, "list[str] | None"]):
-    """Links for a batch, resolved on first access.
+@dataclass(frozen=True)
+class Entry:
+    """Where a title's answer came from.
 
-        [...]    an article and its links
-        None     no article behind the title
-        absent   could not be read — a gap in the data, or a failed fetch
+    Both can be set: a title that 404'd more than a day ago is held and
+    refetched, and it is the fresh one that should be kept.
+    """
 
-    A title still being fetched blocks the first access to it, and is written
-    to the store as it resolves.
+    held: list[str] | None = MISSING
+    arrived: wikifetcher.Page | wikifetcher.PageFetchFailed | None = None
+
+
+class BatchLinks:
+    """Links for a batch of titles, read one at a time.
+
+    Reading one title waits only for that title, so there is deliberately no
+    way to ask for the whole batch at once.
     """
 
     def __init__(
         self,
-        store: LinkStore,
-        known: dict[str, list[str] | None],
-        pending: dict[str, Future[list[str] | None]],
+        titles: Iterable[str],
+        db: LinkDatabase,
+        fetcher: LinkFetcher | None = None,
+        allowance: int | None = None,
     ) -> None:
-        self._store = store
-        self._known = known
-        self._pending = pending
+        wanted = list(dict.fromkeys(titles))
+        self._held = db.get_links(wanted)
+        self._pending: dict[str, Future[wikifetcher.Page]] = {}
+        self._resolved: dict[str, Entry] = {}
+        self._silenced = 0
 
-    def __getitem__(self, title: str) -> list[str] | None:
-        self._resolve(title)
-        return self._known[title]
+        if fetcher is None:
+            self.submitted = 0
+            return
 
-    def __iter__(self) -> Iterator[str]:
-        self.drain()
-        return iter(self._known)
+        to_fetch = [title for title in wanted if title not in self._held]
 
-    def __len__(self) -> int:
-        self.drain()
-        return len(self._known)
+        # A title that 404s becomes an article only when somebody writes one,
+        # so these are worth another look but rarely.
+        to_fetch += db.stale_titles(
+            [t for t, links in self._held.items() if links is None],
+            NOT_FOUND_TTL_S,
+            type=PageType.NOTFOUND,
+        )
 
-    def drain(self) -> None:
-        """Resolve everything still outstanding.
+        # Whatever the allowance will not cover stays unfetched, which reads as
+        # a page nobody could read.
+        if allowance is not None and len(to_fetch) > allowance:
+            log.info(
+                "    fetch budget reached: %d page(s) left unread",
+                len(to_fetch) - allowance,
+            )
+            to_fetch = to_fetch[:allowance]
 
-        Pages already fetched are written even if nobody asked for them, so a
-        search that ends early does not throw away work it paid for.
+        log.info(
+            "    %sbatch of %d: %d held, %d to retrieve",
+            logctx.where(), len(wanted), len(self._held), len(to_fetch),
+        )
+        self.submitted = len(to_fetch)
+        if to_fetch:
+            self._pending = fetcher.submit(to_fetch)
+
+    def get(self, title: str) -> Entry:
+        """Returns the fetched data for the given title, blocks until available"""
+        if title not in self._resolved:
+            self._resolved[title] = self._wait(title)
+        return self._resolved[title]
+
+    def drain(self) -> dict[str, Entry]:
+        """Resolve everything still outstanding, and return it.
+
+        Pages already fetched are worth keeping even if nobody asked for them:
+        a search that ends early has paid for them either way.
         """
-        for title in list(self._pending):
-            self._resolve(title)
+        return {title: self.get(title) for title in list(self._pending)}
 
-    def keep_what_landed(self) -> None:
-        """Write the pages already fetched and abandon the rest.
+    def keep_what_landed(self) -> dict[str, Entry]:
+        """Resolve what has already arrived and abandon the rest.
 
         A batch submits every title at once and a semaphore holds all but a few
         back, so most of what is outstanding has not been sent. Waiting on those
         would start requests nobody is going to read.
         """
+        landed = {}
         for title, future in list(self._pending.items()):
             if future.done():
-                self._resolve(title)
+                landed[title] = self.get(title)
             else:
                 future.cancel()
                 del self._pending[title]
+        return landed
 
-    def _resolve(self, title: str) -> None:
+    def _wait(self, title: str) -> Entry:
+        held = self._held.get(title, MISSING)
         future = self._pending.pop(title, None)
         if future is None:
-            return
+            return Entry(held=held)
 
         try:
-            page = future.result(timeout=FETCH_TIMEOUT_S)
+            return Entry(held=held, arrived=future.result(timeout=FETCH_TIMEOUT_S))
         except TimeoutError:
-            self._store.note_failure(title, f"timed out after {FETCH_TIMEOUT_S:.0f}s")
-            log.warning("fetch timed out: %s", title)
-            return
+            reason = f"timed out after {FETCH_TIMEOUT_S:.0f}s"
+        except wikifetcher.PageUnavailable as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            # A stopped fetcher fails every remaining title for one reason, so
+            # it is worth saying once rather than once per page.
+            self._silenced += 1
+            if self._silenced == 1:
+                log.warning("could not read %s (%s)", title, reason)
+            elif self._silenced == 2:
+                log.warning("the rest of this batch fails the same way")
+            return Entry(held=held, arrived=wikifetcher.PageFetchFailed(title, reason))
         except Exception as exc:
-            self._store.note_failure(title, f"{type(exc).__name__}: {exc}")
-            log.warning("fetch failed: %s (%s: %s)", title, type(exc).__name__, exc)
-            return
+            reason = f"{type(exc).__name__}: {exc}"
 
-        self._store.write(page)
-
-        # Under the title asked for, which a redirect makes different from the
-        # one the page is filed under. Both name the same links.
-        self._known[title] = page.links
+        log.warning("could not read %s (%s)", title, reason)
+        return Entry(held=held, arrived=wikifetcher.PageFetchFailed(title, reason))

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 import logctx
 import wikifetcher
-from link_store import UNKNOWN, LinkStore
+from link_store import PAGE_FETCH_FAILED, LinkStore
 from settings import (
     CRAWL_FETCH_BUDGET,
     MAX_CONCURRENCY,
@@ -84,15 +84,15 @@ class WalkResult:
     pages_expanded: int
     complete: bool
     elapsed_s: float = 0.0
-    unread: set[str] = field(default_factory=set)
+    failed: set[str] = field(default_factory=set)
 
     # What the store knew about the target when the walk started.
     target_state: str | None = None
 
     # 'ok', 'notfound', or None (unknown). "No path" reads differently when
     # the source has no article behind it.
-    source_status: str | None = None
-    target_status: str | None = None
+    source_type: str | None = None
+    target_type: str | None = None
 
     # Why an endpoint could not be read, when something went wrong reading it.
     failures: dict[str, str] = field(default_factory=dict)
@@ -106,7 +106,7 @@ class Walker:
     """Breadth-first search over a link store."""
 
     def __init__(self, store: LinkStore, *, batch_size: int = WALK_BATCH_SIZE) -> None:
-        self._store = store
+        self._linkstore = store
         self._batch_size = batch_size
 
     def find_path(
@@ -131,16 +131,16 @@ class Walker:
         article behind it is still reachable.
         """
         log.info("check endpoints: %s, %s", source, target)
-        source_status = self._store.status(source)
-        target_status = self._store.status(target)
-        store_failures = getattr(self._store, "failures", {})
+        source_type = self._linkstore.page_type(source)
+        target_type = self._linkstore.page_type(target)
+        store_failures = getattr(self._linkstore, "failures", {})
         endpoint_failures = {
             t: store_failures[t] for t in (source, target) if t in store_failures
         }
         states = {}
         for title in (source, target):
-            states[title] = self._store.state(title)
-            names = self._store.destination(title)
+            states[title] = self._linkstore.state(title)
+            names = self._linkstore.destination(title)
 
             if names:
                 # The walk sees what it names, but the title itself is not that.
@@ -154,28 +154,28 @@ class Walker:
             why = endpoint_failures.get(title) or STATE_MEANING[states[title]]
             log.info("    %s is %s, %s", title, states[title], why)
 
-        if source == target and source_status is not None:
+        if source == target and source_type is not None:
             return WalkResult(
                 [source], 0, 0, True,
-                source_status=source_status, target_status=target_status,
+                source_type=source_type, target_type=target_type,
                 target_state=states[target],
             )
 
         # Checked before searching: a source with no article has nothing to
         # follow, and a title nothing links to can never be discovered. Proving
         # either by search costs a full sweep of the graph.
-        if source_status != "article" or target_status is None:
-            unknown = {t for t, s in ((source, source_status), (target, target_status))
+        if source_type != "article" or target_type is None:
+            unknown = {t for t, s in ((source, source_type), (target, target_type))
                        if s is None}
             return WalkResult(
-                None, 0, 0, not unknown, unread=unknown,
-                source_status=source_status, target_status=target_status,
+                None, 0, 0, not unknown, failed=unknown,
+                source_type=source_type, target_type=target_type,
                 target_state=states[target], failures=endpoint_failures,
             )
 
         result = self._search(source, target, max_depth=max_depth, max_walked=max_walked)
-        result.source_status = source_status
-        result.target_status = target_status
+        result.source_type = source_type
+        result.target_type = target_type
         result.target_state = states[target]
         result.failures = endpoint_failures
         return result
@@ -200,7 +200,7 @@ class Walker:
 
         # Pages the walk needed and could not read: a gap in a dump, a failed
         # fetch in a crawl. Red links are not here — those are real dead ends.
-        unread: set[str] = set()
+        failed: set[str] = set()
 
         # frontier - Standard graph-search term. The set of pages discovered but not yet expanded
         # boundary between explored and not yet explored
@@ -218,34 +218,36 @@ class Walker:
 
             # batched walk
             for start in range(0, len(frontier), self._batch_size):
-                batch = frontier[start : start + self._batch_size]
+                in_batch = {"expanded": 0, "red_links": 0, "failed": 0}
                 batch_number += 1
+                
+                batch = frontier[start : start + self._batch_size]
                 log.info(
                     "  depth %d batch %d links %d (max links %d)",
-                    depth, batch_number, len(batch), self._batch_size,
-                )
-                links = self._store.get_links(batch)
-                in_batch = {"expanded": 0, "red_links": 0, "unread": 0}
+                    depth, batch_number, len(batch), self._batch_size)
 
-                for page in batch:
+                # init LinkStore BatchLinks that returns a union of (db records, in-flight reqs)
+                self._linkstore.open_batch(batch)
+
+                for parent_page in batch:
                     # Check if we are over the max pages budget
                     if max_walked is not None and expanded >= max_walked:
                         log.info("    stopping: page budget %d reached", max_walked)
                         return WalkResult(
                             None, depth, expanded, False,
-                            time.monotonic() - started, unread,
+                            time.monotonic() - started, failed,
                         )
 
                     # NOTE this call blocks until the page is fetched (if not in db)
-                    outgoing_links = links.get(page, UNKNOWN)
+                    outgoing_links = self._linkstore.links_of(parent_page)
 
-                    if outgoing_links is UNKNOWN:
+                    if outgoing_links is PAGE_FETCH_FAILED:
                         # Could not be read: a gap in a dump, a failed fetch in
                         # a crawl. Either way the walk is not exhaustive.
-                        # NOTE to be defined if retry or not, if sleep/wait or not
+                        # NOTE we do not retry for simplicity.
                         # if you re-crawl manually, it will retry only the failed fetches.
-                        unread.add(page)
-                        in_batch["unread"] += 1
+                        failed.add(parent_page)
+                        in_batch["failed"] += 1
                         continue
 
                     if outgoing_links is None:
@@ -263,46 +265,45 @@ class Walker:
                             # Already discovered at this depth or a shallower one
                             continue
 
-                        # TODO fix this comment
-                        # Visited at discovery, not expansion — otherwise a hub
-                        # is queued once per inbound link.
-                        parent[link] = page
+                        # Adding the new link -> containing page 
+                        parent[link] = parent_page
                         discovered += 1
 
                         # NOTE its found!
                         if link == target:
-                            log.info("    %s links to %s — found", page, target)
+                            log.info("    %s links to %s — found", parent_page, target)
                             return WalkResult(
                                 # NOTE extracts the path from source to target
                                 _reconstruct(parent, target),
                                 depth + 1,
                                 expanded,
-                                not unread,
+                                not failed,
                                 time.monotonic() - started,
-                                unread,
+                                failed,
                             )
 
+                        # We will read the link at the next frontier
                         next_frontier.append(link)
 
                     if trace:
                         log.debug(
                             "      expand %s: %d link(s), %d new",
-                            page, len(outgoing_links), discovered,
+                            parent_page, len(outgoing_links), discovered,
                         )
 
-                if in_batch["red_links"] or in_batch["unread"]:
+                if in_batch["red_links"] or in_batch["failed"]:
                     log.info(
                         "    %d expanded, %d red link(s) (link pointing to a "
-                        "notfound page), %d unread",
-                        in_batch["expanded"], in_batch["red_links"], in_batch["unread"],
+                        "notfound page), %d failed",
+                        in_batch["expanded"], in_batch["red_links"], in_batch["failed"],
                     )
 
             if not next_frontier:
                 # Nothing new to explore: the target is unreachable from the source.
                 log.info("  nothing new at depth %d: %s is unreachable", depth, target)
                 return WalkResult(
-                    None, depth, expanded, not unread,
-                    time.monotonic() - started, unread,
+                    None, depth, expanded, not failed,
+                    time.monotonic() - started, failed,
                 )
 
             # Equally short paths usually exist; sorting makes the choice
@@ -311,7 +312,7 @@ class Walker:
 
         # Ran out of depth budget with the target still unseen.
         return WalkResult(
-            None, max_depth, expanded, False, time.monotonic() - started, unread
+            None, max_depth, expanded, False, time.monotonic() - started, failed
         )
 
 def _reconstruct(parent: dict[str, str | None], target: str) -> list[str]:
@@ -359,22 +360,22 @@ def print_path(path: list[str], site: str) -> None:
 
 
 def endpoint_notes(result: WalkResult, source: str, target: str, site: str) -> list[str]:
-    """Explain an endpoint when its status changes how to read the result."""
+    """Explain an endpoint when its type changes how to read the result."""
     notes: list[str] = []
 
-    if result.source_status is None:
+    if result.source_type is None:
         why = result.failures.get(source)
         notes.append(
             f"{wikifetcher.to_name(source)} could not be read"
             + (f" ({why})." if why else ".")
         )
-    elif result.source_status == "notfound":
+    elif result.source_type == "notfound":
         notes.append(
             f"{wikifetcher.to_name(source)} has no article on {site}, so there is nothing "
             f"to link out from and no path can start here."
         )
 
-    if result.target_status is None:
+    if result.target_type is None:
         why = result.failures.get(target)
         notes.append(
             f"{wikifetcher.to_name(target)} could not be read"
@@ -382,7 +383,7 @@ def endpoint_notes(result: WalkResult, source: str, target: str, site: str) -> l
             + " It may well have no article behind it, which is a target the"
             " walk accepts — pages can link to a title nobody has written."
         )
-    elif result.target_status == "notfound":
+    elif result.target_type == "notfound":
         # Not an error: a title with no article behind it is still a link target.
         notes.append(
             f"{wikifetcher.to_name(target)} has no article on {site}. Nothing leads out of "
@@ -520,7 +521,7 @@ def main() -> None:
 
     if result.found:
         print_path(result.path, site)
-    elif result.source_status != "article" or result.target_status is None:
+    elif result.source_type != "article" or result.target_type is None:
         print(f"\nNo path from {wikifetcher.to_name(source)} to {wikifetcher.to_name(target)}.")
     else:
         print(f"\nNo path found within {result.depth_reached} links.")
@@ -538,9 +539,9 @@ def main() -> None:
         # of partial it was — absent data and an exhausted budget are different
         # problems with different fixes.
         cause = (
-            f"{len(result.unread):,} page{'' if len(result.unread) == 1 else 's'}"
-            f" absent from the database"
-            if result.unread
+            f"{len(result.failed):,} page{'' if len(result.failed) == 1 else 's'}"
+            f" could not be read"
+            if result.failed
             else "stopped at the depth or page budget"
         )
         caveat = (

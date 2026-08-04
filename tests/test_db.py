@@ -59,11 +59,11 @@ def test_not_found_does_not_report_ordinary_articles(sql: LinkDatabase) -> None:
 
 def test_a_row_cannot_carry_a_status_outside_the_two(sql: LinkDatabase) -> None:
     """`unknown` is the absence of a row, so it must not be storable as one."""
-    for status in ("unknown", "hello there"):
+    for type in ("unknown", "hello there"):
         with pytest.raises(sqlite3.IntegrityError):
             sql._conn.execute(
-                "INSERT INTO pages (title, fetched_at, status) VALUES (?, ?, ?)",
-                ("Somewhere", 0.0, status),
+                "INSERT INTO pages (title, fetched_at, type) VALUES (?, ?, ?)",
+                ("Somewhere", 0.0, type),
             )
 
 
@@ -71,9 +71,9 @@ def test_status_reports_all_three_kinds(sql: LinkDatabase) -> None:
     sql.store("Barren", [])
     sql.mark_not_found(["Nowhere"])
 
-    assert sql.status("Barren") == "article"
-    assert sql.status("Nowhere") == "notfound"
-    assert sql.status("Unfetched") is None
+    assert sql.page_type("Barren") == "article"
+    assert sql.page_type("Nowhere") == "notfound"
+    assert sql.page_type("Unfetched") is None
 
 
 # --------------------------------------------------------------------------
@@ -149,7 +149,7 @@ def test_a_dump_load_keeps_redirects_as_titles_naming_a_page(
 
     sql.build_from_staging("0")
 
-    assert sql.status("Cheddar") == "redirect"
+    assert sql.page_type("Cheddar") == "redirect"
     assert sql.destination("Cheddar") == "Cheese"
     assert sql.get_links(["Cheddar"]) == {"Cheddar": []}
 
@@ -192,7 +192,7 @@ def test_marking_a_redirect_drops_the_edges_it_had(sql: LinkDatabase) -> None:
 
     sql.mark_redirects(["UK"], "United_Kingdom")
 
-    assert sql.status("UK") == "redirect"
+    assert sql.page_type("UK") == "redirect"
     assert sql.destination("UK") == "United_Kingdom"
     assert sql.link_count() == 0
 
@@ -271,7 +271,7 @@ def test_staleness_can_be_narrowed_to_missing_titles(sql: LinkDatabase) -> None:
     sql.store("Article", [])
     sql.mark_not_found(["Nowhere"])
 
-    stale = sql.stale_titles(["Article", "Nowhere"], max_age_s=-1, status="notfound")
+    stale = sql.stale_titles(["Article", "Nowhere"], max_age_s=-1, type="notfound")
 
     assert stale == ["Nowhere"]
 
@@ -333,7 +333,7 @@ def test_forgetting_a_page_returns_it_to_unknown(sql: LinkDatabase) -> None:
     pages, links = sql.forget("Cheshire")
 
     assert (pages, links) == (1, 2)
-    assert sql.status("Cheshire") is None
+    assert sql.page_type("Cheshire") is None
     assert sql.get_links(["Cheshire"]) == {}
 
 
@@ -357,5 +357,5 @@ def test_a_forgotten_missing_title_is_no_longer_recorded(sql: LinkDatabase) -> N
 
     sql.forget("Nowhere")
 
-    assert sql.status("Nowhere") is None
+    assert sql.page_type("Nowhere") is None
     assert sql.not_found_count() == 0

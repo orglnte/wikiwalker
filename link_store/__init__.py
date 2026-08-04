@@ -9,18 +9,20 @@
 the wire is not visible from outside it.
 """
 
-from .batch import UNKNOWN, BatchLinks
-from .db import SCHEMA, LinkDatabase, PageStatus
+from .batch import MISSING, PAGE_FETCH_FAILED, BatchLinks, Entry
+from .db import SCHEMA, LinkDatabase, PageType
 from .fetcher import LinkFetcher
 from .store import DB_FILE, LinkStore
 
 __all__ = [
     "DB_FILE",
     "SCHEMA",
-    "UNKNOWN",
+    "MISSING",
+    "PAGE_FETCH_FAILED",
     "BatchLinks",
+    "Entry",
     "LinkDatabase",
     "LinkFetcher",
     "LinkStore",
-    "PageStatus",
+    "PageType",
 ]
