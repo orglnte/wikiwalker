@@ -6,14 +6,13 @@ build-backend = "hatchling.build"
 name = "wikiwalker"
 version = "0.1.0"
 description = "Shortest path between two Wikipedia articles"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = []
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
   "ruff>=0.6",
-  "mypy>=1.10",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -25,12 +24,7 @@ addopts = "-ra -q"
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-
-[tool.mypy]
-python_version = "3.12"
-strict = true
-files = ["link_store", "wikifetcher", "walker.py", "data_cli.py", "scrape_cli.py"]

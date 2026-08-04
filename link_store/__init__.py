@@ -1,22 +1,26 @@
 """Where a Walker gets its links.
 
-    base.py     the LinkStore interface
-    db.py       LinkDatabase — a link store on SQLite
-    caching.py  CachingLinkStore — a link store backed by a fetcher
+    store.py    LinkStore — holds links, retrieves what it does not hold
+    db.py       LinkDatabase — the SQLite behind it
+    fetcher.py  LinkFetcher — concurrent retrieval, a future per page
+    batch.py    BatchLinks — one batch's answer, resolved on access
 
-Two implementations, and the difference between them is what an unknown title
-means. To `LinkDatabase` it is a gap in a loaded snapshot; to `CachingLinkStore`
-it is a page nobody has asked for yet.
+`LinkStore` is the only one a search needs. Whether a page came off disk or off
+the wire is not visible from outside it.
 """
 
-from .base import LinkStore
-from .caching import CachingLinkStore
+from .batch import UNKNOWN, BatchLinks
 from .db import RED_LINK_TTL_S, SCHEMA, LinkDatabase
+from .fetcher import LinkFetcher
+from .store import DB_FILE, LinkStore
 
 __all__ = [
+    "DB_FILE",
     "RED_LINK_TTL_S",
     "SCHEMA",
-    "CachingLinkStore",
+    "UNKNOWN",
+    "BatchLinks",
     "LinkDatabase",
+    "LinkFetcher",
     "LinkStore",
 ]

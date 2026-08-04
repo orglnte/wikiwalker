@@ -14,165 +14,156 @@ from __future__ import annotations
 
 from link_store import RED_LINK_TTL_S, LinkDatabase
 
-
 # --------------------------------------------------------------------------
 # The three-way distinction
 # --------------------------------------------------------------------------
 
-def test_fetched_article_with_no_links_is_present_and_empty(db: LinkDatabase) -> None:
-    db.store("Barren", [])
+def test_fetched_article_with_no_links_is_present_and_empty(sql: LinkDatabase) -> None:
+    sql.store("Barren", [])
 
-    assert db.get_links(["Barren"]) == {"Barren": []}
-
-
-def test_red_link_is_absent_from_get_links(db: LinkDatabase) -> None:
-    """A red link must not look like an article that happens to link nowhere.
-
-    Before the status filter existed this returned `{"Nowhere": []}`, and the
-    walker counted a non-existent page as a fully explored one.
-    """
-    db.mark_red_links(["Nowhere"])
-
-    assert db.get_links(["Nowhere"]) == {}
-    assert db.red_links(["Nowhere"]) == {"Nowhere"}
+    assert sql.get_links(["Barren"]) == {"Barren": []}
 
 
-def test_never_fetched_title_is_absent_from_both(db: LinkDatabase) -> None:
-    assert db.get_links(["Unfetched"]) == {}
-    assert db.red_links(["Unfetched"]) == set()
+def test_a_red_link_reads_as_no_article_not_as_empty(sql: LinkDatabase) -> None:
+    """None and [] must not be confused: no article, versus an article that
+    links nowhere."""
+    sql.mark_red_links(["Nowhere"])
+
+    assert sql.get_links(["Nowhere"]) == {"Nowhere": None}
 
 
-def test_the_three_kinds_are_told_apart_in_one_call(db: LinkDatabase) -> None:
-    db.store("Barren", [])
-    db.mark_red_links(["Nowhere"])
-    titles = ["Barren", "Nowhere", "Unfetched"]
-
-    articles = db.get_links(titles)
-    dead = db.red_links(titles)
-
-    assert set(articles) == {"Barren"}
-    assert dead == {"Nowhere"}
-    assert [t for t in titles if t not in articles and t not in dead] == ["Unfetched"]
+def test_never_fetched_title_is_absent(sql: LinkDatabase) -> None:
+    assert sql.get_links(["Unfetched"]) == {}
 
 
-def test_red_links_does_not_report_ordinary_articles(db: LinkDatabase) -> None:
-    db.store("Real", ["Elsewhere"])
+def test_the_three_kinds_are_told_apart_in_one_call(sql: LinkDatabase) -> None:
+    sql.store("Barren", [])
+    sql.mark_red_links(["Nowhere"])
 
-    assert db.red_links(["Real"]) == set()
+    known = sql.get_links(["Barren", "Nowhere", "Unfetched"])
+
+    assert known == {"Barren": [], "Nowhere": None}
+    assert "Unfetched" not in known
 
 
-def test_status_reports_all_three_kinds(db: LinkDatabase) -> None:
-    db.store("Barren", [])
-    db.mark_red_links(["Nowhere"])
+def test_red_links_does_not_report_ordinary_articles(sql: LinkDatabase) -> None:
+    sql.store("Real", ["Elsewhere"])
 
-    assert db.status("Barren") == "ok"
-    assert db.status("Nowhere") == "redlink"
-    assert db.status("Unfetched") is None
+    assert sql.red_links(["Real"]) == set()
+
+
+def test_status_reports_all_three_kinds(sql: LinkDatabase) -> None:
+    sql.store("Barren", [])
+    sql.mark_red_links(["Nowhere"])
+
+    assert sql.status("Barren") == "ok"
+    assert sql.status("Nowhere") == "redlink"
+    assert sql.status("Unfetched") is None
 
 
 # --------------------------------------------------------------------------
 # Recording a red link over existing data
 # --------------------------------------------------------------------------
 
-def test_marking_a_red_link_removes_a_deleted_articles_edges(db: LinkDatabase) -> None:
+def test_marking_a_red_link_removes_a_deleted_articles_edges(sql: LinkDatabase) -> None:
     """An article that later 404s must lose its edges, not keep them.
 
     Otherwise the search keeps walking out of a page that no longer exists.
     """
-    db.store("Doomed", ["A", "B"])
+    sql.store("Doomed", ["A", "B"])
 
-    db.mark_red_links(["Doomed"])
+    sql.mark_red_links(["Doomed"])
 
-    assert db.get_links(["Doomed"]) == {}
-    assert db.red_links(["Doomed"]) == {"Doomed"}
-    assert db.link_count() == 0
+    assert sql.get_links(["Doomed"]) == {"Doomed": None}
+    assert sql.red_links(["Doomed"]) == {"Doomed"}
+    assert sql.link_count() == 0
 
 
-def test_storing_an_article_clears_a_previous_red_link(db: LinkDatabase) -> None:
+def test_storing_an_article_clears_a_previous_red_link(sql: LinkDatabase) -> None:
     """The reverse direction: somebody wrote the missing article."""
-    db.mark_red_links(["Someday"])
+    sql.mark_red_links(["Someday"])
 
-    db.store("Someday", ["Bristol"])
+    sql.store("Someday", ["Bristol"])
 
-    assert db.get_links(["Someday"]) == {"Someday": ["Bristol"]}
-    assert db.red_links(["Someday"]) == set()
+    assert sql.get_links(["Someday"]) == {"Someday": ["Bristol"]}
+    assert sql.red_links(["Someday"]) == set()
 
 
 # --------------------------------------------------------------------------
 # Counting
 # --------------------------------------------------------------------------
 
-def test_counts_separate_articles_from_red_links(db: LinkDatabase) -> None:
-    db.store("One", ["Two"])
-    db.store("Two", [])
-    db.mark_red_links(["Nowhere", "Neither"])
+def test_counts_separate_articles_from_red_links(sql: LinkDatabase) -> None:
+    sql.store("One", ["Two"])
+    sql.store("Two", [])
+    sql.mark_red_links(["Nowhere", "Neither"])
 
-    assert db.page_count() == 2
-    assert db.red_link_count() == 2
-    assert db.link_count() == 1
+    assert sql.page_count() == 2
+    assert sql.red_link_count() == 2
+    assert sql.link_count() == 1
 
 
 # --------------------------------------------------------------------------
 # Link storage
 # --------------------------------------------------------------------------
 
-def test_links_come_back_in_page_order(db: LinkDatabase) -> None:
+def test_links_come_back_in_page_order(sql: LinkDatabase) -> None:
     """Order is stable so two runs over the same data return the same path."""
     order = ["Zebra", "Apple", "Mango"]
-    db.store("Page", order)
+    sql.store("Page", order)
 
-    assert db.get_links(["Page"])["Page"] == order
+    assert sql.get_links(["Page"])["Page"] == order
 
 
-def test_restoring_a_page_replaces_its_links_rather_than_appending(db: LinkDatabase) -> None:
+def test_restoring_a_page_replaces_its_links_rather_than_appending(sql: LinkDatabase) -> None:
     """A refresh must reflect removals, not just additions."""
-    db.store("Page", ["Old", "Kept"])
+    sql.store("Page", ["Old", "Kept"])
 
-    db.store("Page", ["Kept", "New"])
+    sql.store("Page", ["Kept", "New"])
 
-    assert db.get_links(["Page"])["Page"] == ["Kept", "New"]
-    assert db.link_count() == 2
+    assert sql.get_links(["Page"])["Page"] == ["Kept", "New"]
+    assert sql.link_count() == 2
 
 
-def test_a_page_can_link_to_the_same_title_twice(db: LinkDatabase) -> None:
+def test_a_page_can_link_to_the_same_title_twice(sql: LinkDatabase) -> None:
     """Duplicates survive storage — `ord` is the key, not `dst`.
 
     Real pages do this (an infobox and the body linking the same article), and
     the dump produces it too when two redirects resolve to one target.
     """
-    db.store("Page", ["Same", "Other", "Same"])
+    sql.store("Page", ["Same", "Other", "Same"])
 
-    assert db.get_links(["Page"])["Page"] == ["Same", "Other", "Same"]
+    assert sql.get_links(["Page"])["Page"] == ["Same", "Other", "Same"]
 
 
 # --------------------------------------------------------------------------
 # Freshness
 # --------------------------------------------------------------------------
 
-def test_nothing_is_stale_within_the_age_limit(db: LinkDatabase) -> None:
-    db.store("Fresh", [])
+def test_nothing_is_stale_within_the_age_limit(sql: LinkDatabase) -> None:
+    sql.store("Fresh", [])
 
-    assert db.stale_titles(["Fresh"], max_age_s=RED_LINK_TTL_S) == []
-
-
-def test_everything_known_is_stale_at_a_zero_age_limit(db: LinkDatabase) -> None:
-    db.store("Fresh", [])
-
-    assert db.stale_titles(["Fresh"], max_age_s=-1) == ["Fresh"]
+    assert sql.stale_titles(["Fresh"], max_age_s=RED_LINK_TTL_S) == []
 
 
-def test_unknown_titles_are_never_reported_stale(db: LinkDatabase) -> None:
+def test_everything_known_is_stale_at_a_zero_age_limit(sql: LinkDatabase) -> None:
+    sql.store("Fresh", [])
+
+    assert sql.stale_titles(["Fresh"], max_age_s=-1) == ["Fresh"]
+
+
+def test_unknown_titles_are_never_reported_stale(sql: LinkDatabase) -> None:
     """Stale means "known and old". A title we have never seen is neither."""
-    assert db.stale_titles(["Unfetched"], max_age_s=-1) == []
+    assert sql.stale_titles(["Unfetched"], max_age_s=-1) == []
 
 
-def test_staleness_can_be_narrowed_to_red_links(db: LinkDatabase) -> None:
+def test_staleness_can_be_narrowed_to_red_links(sql: LinkDatabase) -> None:
     """Articles and red links get different lifetimes, so the check must
     be able to look at one kind without dragging in the other."""
-    db.store("Article", [])
-    db.mark_red_links(["Nowhere"])
+    sql.store("Article", [])
+    sql.mark_red_links(["Nowhere"])
 
-    stale = db.stale_titles(["Article", "Nowhere"], max_age_s=-1, status="redlink")
+    stale = sql.stale_titles(["Article", "Nowhere"], max_age_s=-1, status="redlink")
 
     assert stale == ["Nowhere"]
 
@@ -188,33 +179,35 @@ def test_queries_survive_more_titles_than_sqlite_allows_per_statement() -> None:
     asking for more titles than one statement could ever carry. Without the
     batching this raises `sqlite3.OperationalError: too many SQL variables`.
     """
-    with LinkDatabase(":memory:") as db:
+    with LinkDatabase(":memory:") as sql:
         articles = [f"Article_{i:04d}" for i in range(1500)]
         dead = [f"Missing_{i:04d}" for i in range(1500)]
         for title in articles:
-            db.store(title, ["Hub"])
-        db.mark_red_links(dead)
+            sql.store(title, ["Hub"])
+        sql.mark_red_links(dead)
 
         wanted = articles + dead
-        assert len(db.get_links(wanted)) == len(articles)
-        assert len(db.red_links(wanted)) == len(dead)
-        assert len(db.stale_titles(wanted, max_age_s=-1)) == len(wanted)
+        known = sql.get_links(wanted)
+        assert len(known) == len(wanted)
+        assert sum(1 for links in known.values() if links is None) == len(dead)
+        assert len(sql.red_links(wanted)) == len(dead)
+        assert len(sql.stale_titles(wanted, max_age_s=-1)) == len(wanted)
 
 
 # --------------------------------------------------------------------------
 # Metadata
 # --------------------------------------------------------------------------
 
-def test_meta_round_trips_and_defaults(db: LinkDatabase) -> None:
-    assert db.get_meta("site", "fallback.example") == "fallback.example"
+def test_meta_round_trips_and_defaults(sql: LinkDatabase) -> None:
+    assert sql.get_meta("site", "fallback.example") == "fallback.example"
 
-    db.set_meta("site", "simple.wikipedia.org")
+    sql.set_meta("site", "simple.wikipedia.org")
 
-    assert db.get_meta("site") == "simple.wikipedia.org"
+    assert sql.get_meta("site") == "simple.wikipedia.org"
 
 
-def test_meta_overwrites_rather_than_duplicating(db: LinkDatabase) -> None:
-    db.set_meta("site", "first.example")
-    db.set_meta("site", "second.example")
+def test_meta_overwrites_rather_than_duplicating(sql: LinkDatabase) -> None:
+    sql.set_meta("site", "first.example")
+    sql.set_meta("site", "second.example")
 
-    assert db.get_meta("site") == "second.example"
+    assert sql.get_meta("site") == "second.example"

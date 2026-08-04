@@ -85,33 +85,34 @@ class LinkDatabase:
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)
             )
 
-    def get_links(self, titles: Iterable[str]) -> dict[str, list[str]]:
-        """Return `{title: outgoing links}` for the articles that were fetched.
+    def get_links(self, titles: Iterable[str]) -> dict[str, list[str] | None]:
+        """What is known about each title, in one answer.
 
-        Empty list = fetched, links nowhere. Absent = never fetched, or a red
-        link; `red_links` tells those two apart. Red links are excluded here so
-        they cannot pass for empty articles.
+            [...]    an article, and these are its links (empty = links nowhere)
+            None     no article behind this title
+            absent   never fetched
         """
         wanted = list(titles)
-        found: dict[str, list[str]] = {}
+        found: dict[str, list[str] | None] = {}
 
         for batch in _batches(wanted, _PARAM_BATCH):
             placeholders = ",".join("?" * len(batch))
 
             # From `pages` first, so an article with no links still gets an
             # entry; `links` alone would omit it.
-            for (title,) in self._conn.execute(
-                f"SELECT title FROM pages "
-                f"WHERE status = 'ok' AND title IN ({placeholders})",
+            for title, status in self._conn.execute(
+                f"SELECT title, status FROM pages WHERE title IN ({placeholders})",
                 batch,
             ):
-                found[title] = []
+                found[title] = [] if status == "ok" else None
 
             for src, dst in self._conn.execute(
                 f"SELECT src, dst FROM links WHERE src IN ({placeholders}) ORDER BY src, ord",
                 batch,
             ):
-                found[src].append(dst)
+                links = found.get(src)
+                if links is not None:
+                    links.append(dst)
 
         return found
 

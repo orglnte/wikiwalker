@@ -5,13 +5,13 @@ Four modes, one database each so building one cannot destroy another:
 
     test        41 synthetic pages, 1 -> 3 -> 9 -> 27      -> test.db
     simplewiki  Simple English Wikipedia, ~283k articles   -> simplewiki.db
-    enwiki      Full English Wikipedia, gigabytes          -> wikipedia-us.db
+    wikipedia-us  Full English Wikipedia, gigabytes        -> wikipedia-us.db
     empty       schema and site metadata only, to be crawled into
 
 Usage:
     python3 data_cli.py test
     python3 data_cli.py simplewiki
-    python3 data_cli.py enwiki
+    python3 data_cli.py wikipedia-us
     python3 data_cli.py empty --wiki simplewiki
 
 The dump modes parse nothing in Python. MediaWiki dumps are MySQL INSERT
@@ -36,7 +36,7 @@ import sys
 import time
 from pathlib import Path
 
-from link_store import LinkDatabase
+from link_store import DB_FILE, LinkDatabase
 from wikifetcher import sample_wiki
 
 BASE_URL = "https://dumps.wikimedia.org"
@@ -53,24 +53,19 @@ MAIN_NAMESPACE = "0"  # compared as text; see `stage`
 # prefixes, so another language's dump would admit `Catégorie:` and `Portale:`
 # pages as articles — and those are hubs linking to thousands of pages, which
 # yields short paths that are not article paths.
+# name -> (Wikimedia dump prefix, site). The dump prefix is Wikimedia's; the
+# name is ours, and is what `walker.py --db` takes.
 SUPPORTED_WIKIS = {
-    "enwiki": "en.wikipedia.org",
-    "simplewiki": "simple.wikipedia.org",
+    "wikipedia-us": ("enwiki", "en.wikipedia.org"),
+    "simplewiki": ("simplewiki", "simple.wikipedia.org"),
 }
 
-MODES = ("test", "simplewiki", "enwiki", "empty")
-
-# One database per wiki, so building one cannot silently destroy another. An
-# empty database is named for the wiki it is destined to hold.
-DB_NAME = {
-    "test": "test.db",
-    "simplewiki": "simplewiki.db",
-    "enwiki": "wikipedia-us.db",
-}
+MODES = ("test", "simplewiki", "wikipedia-us", "empty")
 
 
 def default_db(mode: str, wiki: str) -> str:
-    return DB_NAME["test"] if mode == "test" else DB_NAME[wiki if mode == "empty" else mode]
+    name = "test" if mode == "test" else (wiki if mode == "empty" else mode)
+    return DB_FILE[name]
 
 
 # --------------------------------------------------------------------------
@@ -309,12 +304,14 @@ def load_dump(wiki: str, work: Path, dump_dir: Path, *, keep_staging: bool) -> N
     parser = find_parser()
     dump_dir.mkdir(parents=True, exist_ok=True)
 
+    dump, site = SUPPORTED_WIKIS[wiki]
+
     with LinkDatabase(str(work)) as db:
-        db.set_meta("site", SUPPORTED_WIKIS[wiki])
+        db.set_meta("site", site)
         db.set_meta("wiki", wiki)
 
-    print(f"Fetching {wiki} dumps into {dump_dir}/")
-    dumps = {table: download(wiki, table, dump_dir) for table in DUMP_TABLES}
+    print(f"Fetching {dump} dumps into {dump_dir}/")
+    dumps = {table: download(dump, table, dump_dir) for table in DUMP_TABLES}
 
     for table in DUMP_TABLES:
         stage(parser, dumps[table], table, str(work))
@@ -333,8 +330,8 @@ def main() -> None:
     argparser.add_argument("mode", choices=MODES, help="which dataset to build")
     argparser.add_argument("--db", default=None,
                            help="output database (default depends on mode)")
-    argparser.add_argument("--wiki", default="enwiki", choices=sorted(SUPPORTED_WIKIS),
-                           help="which site an empty database is for (default: enwiki)")
+    argparser.add_argument("--wiki", default="wikipedia-us", choices=sorted(SUPPORTED_WIKIS),
+                           help="which site an empty database is for")
     argparser.add_argument("--dumps", default="tmp/dumps", help="where downloads are kept")
     argparser.add_argument("--keep-staging", action="store_true",
                            help="do not drop the raw MediaWiki tables afterwards")
@@ -363,9 +360,9 @@ def main() -> None:
             populate_test(db)
     elif args.mode == "empty":
         with LinkDatabase(str(work)) as db:
-            db.set_meta("site", SUPPORTED_WIKIS[args.wiki])
+            db.set_meta("site", SUPPORTED_WIKIS[args.wiki][1])
             db.set_meta("wiki", args.wiki)
-        print(f"Empty database for {SUPPORTED_WIKIS[args.wiki]}")
+        print(f"Empty database for {SUPPORTED_WIKIS[args.wiki][1]}")
     else:
         load_dump(args.mode, work, Path(args.dumps), keep_staging=args.keep_staging)
 

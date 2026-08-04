@@ -101,11 +101,11 @@ if __name__ == "__main__":
     # Measure parse cost on a saved page, no network:
     #     curl -sL https://en.wikipedia.org/wiki/Bristol > tmp/bristol.html
     #     python3 -m wikifetcher.html_links tmp/bristol.html
-    raw = (
-        open(sys.argv[1], encoding="utf-8").read()
-        if len(sys.argv) > 1
-        else sys.stdin.read()
-    )
+    if len(sys.argv) > 1:
+        with open(sys.argv[1], encoding="utf-8") as page:
+            raw = page.read()
+    else:
+        raw = sys.stdin.read()
 
     start = time.perf_counter()
     links = extract_links(raw)

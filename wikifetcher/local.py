@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable
 
 from . import sample_wiki
-from .base import MAX_CONCURRENCY
 from .html_links import extract_links
 
 log = logging.getLogger(__name__)
@@ -28,23 +26,19 @@ class LocalFetcher:
         self._delay_s = delay_s
         self.calls = 0
 
-    async def fetch(self, titles: Iterable[str]) -> dict[str, list[str] | None]:
-        wanted = list(titles)
+    async def fetch(self, title: str) -> list[str] | None:
         self.calls += 1
-        log.info("  fetch %d page(s), at most %d at once", len(wanted), MAX_CONCURRENCY)
+        if self._delay_s:
+            await asyncio.sleep(self._delay_s)
 
-        semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+        html = sample_wiki.render(title)
+        if html is None:
+            log.debug("    GET %s -> 404", title)
+            return None
 
-        async def one(title: str) -> tuple[str, list[str] | None]:
-            async with semaphore:
-                if self._delay_s:
-                    await asyncio.sleep(self._delay_s)
-                html = sample_wiki.render(title)
-                if html is None:
-                    log.debug("    GET %s -> 404", title)
-                    return title, None
-                links = extract_links(html, site=self.site)
-                log.debug("    GET %s -> %dB, %d link(s)", title, len(html), len(links))
-                return title, links
-
-        return dict(await asyncio.gather(*(one(title) for title in wanted)))
+        # Parsing is pure Python and would otherwise hold the event loop for
+        # the whole page. On a free-threaded build this also puts it on another
+        # core; on a stock one it only stops the loop stalling.
+        links = await asyncio.to_thread(extract_links, html, site=self.site)
+        log.debug("    GET %s -> %dB, %d link(s)", title, len(html), len(links))
+        return links

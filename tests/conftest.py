@@ -1,29 +1,33 @@
 """Shared fixtures.
 
-Every test runs against a real `LinkDatabase` on an in-memory SQLite file, not
-a mock. The behaviour under test *is* the SQL — the status filter in
-`get_links`, the batching around the host-parameter limit, the atomicity of
-`store` — and a mock would assert that the fake behaves like the fake.
-
-In-memory keeps it fast enough that isolation per test costs nothing.
+Everything runs against real objects on an in-memory SQLite file, not mocks.
+The behaviour under test *is* the SQL and the store's own bookkeeping, and a
+mock would only assert that the fake behaves like the fake.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from link_store import LinkDatabase
+from link_store import LinkDatabase, LinkStore
 
 
 @pytest.fixture
-def db() -> LinkDatabase:
-    """An empty database, discarded when the test ends."""
+def sql() -> LinkDatabase:
+    """The SQLite layer on its own."""
     with LinkDatabase(":memory:") as database:
         yield database
 
 
 @pytest.fixture
-def graph(db: LinkDatabase) -> LinkDatabase:
+def db() -> LinkStore:
+    """An empty store with nothing to retrieve from."""
+    with LinkStore(":memory:") as store:
+        yield store
+
+
+@pytest.fixture
+def graph(db: LinkStore) -> LinkStore:
     """A small hand-built wiki covering every case the walker must distinguish.
 
         Source ──► Middle ──────────────► Target

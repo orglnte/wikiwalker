@@ -68,7 +68,8 @@ def test_a_known_search_returns_a_short_verified_path(wiki: LinkDatabase) -> Non
     assert result.complete, f"search hit {len(result.missing)} absent pages"
 
     links = wiki.get_links(result.path[:-1])
-    for step, (src, dst) in enumerate(zip(result.path, result.path[1:]), start=1):
+    pairs = zip(result.path, result.path[1:], strict=False)
+    for step, (src, dst) in enumerate(pairs, start=1):
         assert dst in links[src], f"step {step}: {src} does not link to {dst}"
 
 

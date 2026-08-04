@@ -19,11 +19,12 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import sysconfig
 import time
 from dataclasses import dataclass, field
 
 import wikifetcher
-from link_store import CachingLinkStore, LinkDatabase, LinkStore
+from link_store import UNKNOWN, LinkStore
 
 log = logging.getLogger("walker")
 
@@ -41,7 +42,7 @@ class WalkResult:
     pages_expanded: int
     complete: bool
     elapsed_s: float = 0.0
-    missing: set[str] = field(default_factory=set)
+    unread: set[str] = field(default_factory=set)
 
     # 'ok', 'redlink', or None (unknown). "No path" reads differently when the
     # source has no article behind it.
@@ -102,7 +103,7 @@ class Walker:
             unknown = {t for t, s in ((source, source_status), (target, target_status))
                        if s is None}
             return WalkResult(
-                None, 0, 0, not unknown, missing=unknown,
+                None, 0, 0, not unknown, unread=unknown,
                 source_status=source_status, target_status=target_status,
             )
 
@@ -129,10 +130,9 @@ class Walker:
         # The source has no discoverer, hence None.
         parent: dict[str, str | None] = {source: None}
 
-        # Link targets the database cannot explain: not articles, not red links.
-        # Gaps in our data, so a search that hit one is not exhaustive. Red links
-        # are excluded — a dead end costs the result nothing.
-        missing: set[str] = set()
+        # Pages the walk needed and could not read: a gap in a dump, a failed
+        # fetch in a crawl. Red links are not here — those are real dead ends.
+        unread: set[str] = set()
 
         # frontier - Standard graph-search term. The set of pages discovered but not yet expanded
         # boundary between explored and not yet explored
@@ -155,28 +155,25 @@ class Walker:
                     log.info("  stopping: page budget %d reached", max_pages)
                     return WalkResult(
                         None, depth, expanded, False,
-                        time.monotonic() - started, missing,
+                        time.monotonic() - started, unread,
                     )
 
                 links = self._store.get_links(batch)
-
-                # Split the rest into known red links and real gaps, one query
-                # per batch rather than one per page.
-                unexplained = [page for page in batch if page not in links]
-                if unexplained:
-                    dead_ends = self._store.red_links(unexplained)
-                    gaps = [page for page in unexplained if page not in dead_ends]
-                    missing.update(gaps)
-                    log.info(
-                        "  batch of %d: %d article(s), %d dead end(s), %d gap(s)",
-                        len(batch), len(links), len(dead_ends), len(gaps),
-                    )
-                else:
-                    log.info("  batch of %d: all articles", len(batch))
+                dead_ends = 0
 
                 for page in batch:
-                    outgoing_links = links.get(page)
+                    outgoing_links = links.get(page, UNKNOWN)
+
+                    if outgoing_links is UNKNOWN:
+                        # Could not be read: a gap in a dump, a failed fetch in
+                        # a crawl. Either way the walk is not exhaustive.
+                        unread.add(page)
+                        continue
+
                     if outgoing_links is None:
+                        # No article behind the title. A real dead end, and it
+                        # costs the answer nothing.
+                        dead_ends += 1
                         continue
 
                     expanded += 1
@@ -200,9 +197,9 @@ class Walker:
                                 _reconstruct(parent, target),
                                 depth + 1,
                                 expanded,
-                                not missing,
+                                not unread,
                                 time.monotonic() - started,
-                                missing,
+                                unread,
                             )
 
                         next_frontier.append(link)
@@ -213,12 +210,17 @@ class Walker:
                             page, len(outgoing_links), discovered,
                         )
 
+                log.info(
+                    "  batch of %d: %d expanded, %d dead end(s), %d unread",
+                    len(batch), expanded, dead_ends, len(unread),
+                )
+
             if not next_frontier:
                 # Nothing new to explore: the target is unreachable from the source.
                 log.info("nothing new at depth %d: %s is unreachable", depth, target)
                 return WalkResult(
-                    None, depth, expanded, not missing,
-                    time.monotonic() - started, missing,
+                    None, depth, expanded, not unread,
+                    time.monotonic() - started, unread,
                 )
 
             # Equally short paths usually exist; sorting makes the choice
@@ -227,7 +229,7 @@ class Walker:
 
         # Ran out of depth budget with the target still unseen.
         return WalkResult(
-            None, max_depth, expanded, False, time.monotonic() - started, missing
+            None, max_depth, expanded, False, time.monotonic() - started, unread
         )
 
 # TODO why
@@ -253,7 +255,10 @@ def print_path(path: list[str], site: str) -> None:
     print(f"{'Step':<5} {'Name':<{name_width}}  Link")
     print(f"{'-' * 5} {'-' * name_width}  {'-' * 40}")
     for step, title in enumerate(path, start=1):
-        print(f"{step:<5} {wikifetcher.to_name(title):<{name_width}}  {wikifetcher.to_url(title, site)}")
+        print(
+            f"{step:<5} {wikifetcher.to_name(title):<{name_width}}  "
+            f"{wikifetcher.to_url(title, site)}"
+        )
 
 
 def endpoint_notes(result: WalkResult, source: str, target: str, site: str) -> list[str]:
@@ -284,6 +289,26 @@ def endpoint_notes(result: WalkResult, source: str, target: str, site: str) -> l
         )
 
     return notes
+
+
+def warn_if_gil_reenabled() -> None:
+    """Say so when a free-threaded run silently lost its parallelism.
+
+    Importing a C extension that has not declared free-threading support turns
+    the GIL back on for the whole process, with no error. Fetching and parsing
+    then serialise, and nothing else would show it.
+    """
+    if not sysconfig.get_config_var("Py_GIL_DISABLED"):
+        return
+    if not sys._is_gil_enabled():
+        return
+
+    print(
+        "WARNING: the GIL was re-enabled at runtime — an imported C extension "
+        "has not declared free-threading support, so fetching and parsing ran "
+        "serialised. Re-run with -W error::RuntimeWarning to find which.",
+        file=sys.stderr,
+    )
 
 
 def main() -> None:
@@ -320,24 +345,20 @@ def main() -> None:
     # graph is a wiki.
     source, target = wikifetcher.canonical(args.source), wikifetcher.canonical(args.target)
 
-    db_path = args.db or ("test.db" if args.test else "simplewiki.db")
+    store_name = args.db or ("test" if args.test else "simplewiki")
 
-    with LinkDatabase(db_path) as db:
-        if args.test:
-            fetcher = wikifetcher.LocalFetcher()
-            store: LinkStore = CachingLinkStore(db, fetcher)
-            site = fetcher.site
-            db.set_meta("site", site)
-        else:
-            if db.page_count() == 0:
-                sys.exit(
-                    f"{db_path} is empty — populate it first:\n"
-                    f"    python3 data_cli.py simplewiki --db {db_path}"
-                )
-            store = db
-            # The store records which wiki it holds, so links render against
-            # the right host rather than an assumed one.
-            site = db.get_meta("site", wikifetcher.DEFAULT_SITE)
+    fetcher = wikifetcher.LocalFetcher if args.test else None
+
+    with LinkStore(store_name, fetcher) as store:
+        if fetcher is None and store.page_count() == 0:
+            sys.exit(
+                f"{store_name} is empty — populate it first:\n"
+                f"    python3 data_cli.py simplewiki --db {store_name}"
+            )
+
+        # The store records which wiki it holds, so links render against the
+        # right host rather than an assumed one.
+        site = store.site or wikifetcher.DEFAULT_SITE
 
         result = Walker(store).find_path(
             source, target,
@@ -370,9 +391,9 @@ def main() -> None:
         # of partial it was — absent data and an exhausted budget are different
         # problems with different fixes.
         cause = (
-            f"{len(result.missing):,} page{'' if len(result.missing) == 1 else 's'}"
+            f"{len(result.unread):,} page{'' if len(result.unread) == 1 else 's'}"
             f" absent from the database"
-            if result.missing
+            if result.unread
             else "stopped at the depth or page budget"
         )
         caveat = (
@@ -382,6 +403,7 @@ def main() -> None:
         )
         print(f"WARNING: search was not exhaustive ({cause}) — {caveat}.", file=sys.stderr)
 
+    warn_if_gil_reenabled()
     sys.exit(0 if result.found else 1)
 
 

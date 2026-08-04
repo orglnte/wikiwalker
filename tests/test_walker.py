@@ -16,7 +16,6 @@ from __future__ import annotations
 from link_store import LinkDatabase
 from walker import Walker, endpoint_notes
 
-
 # --------------------------------------------------------------------------
 # Finding the shortest path
 # --------------------------------------------------------------------------
@@ -78,7 +77,7 @@ def test_a_red_link_does_not_make_a_search_incomplete(graph: LinkDatabase) -> No
     the result as doubtful on its account."""
     result = Walker(graph).find_path("Source", "Isolated")
 
-    assert "Nowhere" not in result.missing
+    assert "Nowhere" not in result.unread
 
 
 def test_a_page_we_never_fetched_does_make_a_search_incomplete(graph: LinkDatabase) -> None:
@@ -86,7 +85,7 @@ def test_a_page_we_never_fetched_does_make_a_search_incomplete(graph: LinkDataba
     it is unknown, so no claim of shortest-ness survives it."""
     result = Walker(graph).find_path("Source", "Isolated")
 
-    assert result.missing == {"Unfetched"}
+    assert result.unread == {"Unfetched"}
     assert not result.complete
 
 
@@ -102,7 +101,7 @@ def test_an_unreachable_target_is_reported_completely_when_nothing_is_absent(
     result = Walker(db).find_path("Source", "Marooned")
 
     assert result.path is None
-    assert result.missing == set()
+    assert result.unread == set()
     assert result.complete
 
 
@@ -112,7 +111,7 @@ def test_an_unknown_source_yields_no_path_and_an_incomplete_search(db: LinkDatab
     result = Walker(db).find_path("Ghost", "Somewhere")
 
     assert result.path is None
-    assert result.missing == {"Ghost"}
+    assert result.unread == {"Ghost"}
     assert not result.complete
 
 
@@ -158,7 +157,7 @@ def test_a_red_link_source_can_reach_nothing(db: LinkDatabase) -> None:
 
     assert result.path is None
     assert result.source_status == "redlink"
-    assert result.missing == set()
+    assert result.unread == set()
     assert result.complete
 
 
