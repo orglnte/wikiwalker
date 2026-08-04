@@ -364,6 +364,12 @@ def main() -> None:
     else:
         load_dump(args.mode, work, Path(args.dumps), keep_staging=args.keep_staging)
 
+    # A write-ahead log belongs to the database file it was written for. One
+    # left by an interrupted run would be replayed into the new file, which
+    # SQLite reports as a malformed image.
+    for stale in (Path(f"{target}-wal"), Path(f"{target}-shm")):
+        stale.unlink(missing_ok=True)
+
     # Atomic on POSIX: no moment where the target is half-written.
     work.replace(target)
     print(f"\n{target} ready in {time.monotonic() - started:.1f}s")
