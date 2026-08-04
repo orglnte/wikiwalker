@@ -12,6 +12,10 @@ of what follows is checking they stay apart.
 
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from link_store import LinkDatabase
 from settings import RED_LINK_TTL_S
 
@@ -53,6 +57,16 @@ def test_red_links_does_not_report_ordinary_articles(sql: LinkDatabase) -> None:
     assert sql.red_links(["Real"]) == set()
 
 
+def test_a_row_cannot_carry_a_status_outside_the_two(sql: LinkDatabase) -> None:
+    """`unknown` is the absence of a row, so it must not be storable as one."""
+    for status in ("unknown", "hello there"):
+        with pytest.raises(sqlite3.IntegrityError):
+            sql._conn.execute(
+                "INSERT INTO pages (title, fetched_at, status) VALUES (?, ?, ?)",
+                ("Somewhere", 0.0, status),
+            )
+
+
 def test_status_reports_all_three_kinds(sql: LinkDatabase) -> None:
     sql.store("Barren", [])
     sql.mark_red_links(["Nowhere"])
@@ -88,6 +102,39 @@ def test_storing_an_article_clears_a_previous_red_link(sql: LinkDatabase) -> Non
 
     assert sql.get_links(["Someday"]) == {"Someday": ["Bristol"]}
     assert sql.red_links(["Someday"]) == set()
+
+
+# --------------------------------------------------------------------------
+# Building from a dump
+# --------------------------------------------------------------------------
+
+STAGING = """
+CREATE TABLE t_page (page_id, page_title, page_namespace, page_is_redirect);
+CREATE TABLE t_pagelinks (pl_from, pl_target_id, pl_from_namespace);
+CREATE TABLE t_resolved (target_id, title);
+
+INSERT INTO t_page VALUES (1, 'Bristol', '0', '0'), (2, 'Cheese', '0', '0');
+INSERT INTO t_pagelinks VALUES (1, 10, '0'), (1, 11, '0');
+INSERT INTO t_resolved VALUES (10, 'Cheese'), (11, 'Nowhere');
+"""
+
+
+def test_a_dump_load_separates_articles_from_the_titles_they_link_to(
+    sql: LinkDatabase,
+) -> None:
+    """A snapshot is complete by construction, so a title with no page of its
+    own is a red link rather than something still to look at."""
+    sql._conn.executescript(STAGING)
+
+    sql.build_from_staging("0")
+
+    assert sql.get_links(["Bristol", "Cheese", "Nowhere"]) == {
+        "Bristol": ["Cheese", "Nowhere"],
+        "Cheese": [],
+        "Nowhere": None,
+    }
+    assert sql.page_count() == 2
+    assert sql.red_link_count() == 1
 
 
 # --------------------------------------------------------------------------

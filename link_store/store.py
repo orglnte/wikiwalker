@@ -10,13 +10,17 @@ import wikifetcher
 from settings import DB_FILE, RED_LINK_TTL_S, SITE
 
 from .batch import BatchLinks
-from .db import LinkDatabase
+from .db import LinkDatabase, PageStatus
 from .fetcher import LinkFetcher
 
 log = logging.getLogger(__name__)
 
 # Stored status -> what it means. Absent from the store is a state too.
-STATE = {"ok": "article", "redlink": "redlink", None: "unknown"}
+STATE = {
+    PageStatus.ARTICLE: "article",
+    PageStatus.REDLINK: "redlink",
+    None: "unknown",
+}
 
 
 class LinkStore:
@@ -84,7 +88,7 @@ class LinkStore:
             stale = self._db.stale_titles(
                 [t for t, links in known.items() if links is None],
                 RED_LINK_TTL_S,
-                status="redlink",
+                status=PageStatus.REDLINK,
             )
             to_fetch.extend(stale)
 
@@ -110,8 +114,8 @@ class LinkStore:
         self._open = BatchLinks(self, known, pending)
         return self._open
 
-    def status(self, title: str) -> str | None:
-        """'ok', 'redlink', or None if the title is unknown — retrieving first."""
+    def status(self, title: str) -> PageStatus | None:
+        """The title's status, or None if it is unknown — retrieving first."""
         known = self._db.status(title)
         if known is None and self._fetcher is not None:
             self.get_links([title]).get(title)

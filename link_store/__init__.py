@@ -10,7 +10,7 @@ the wire is not visible from outside it.
 """
 
 from .batch import UNKNOWN, BatchLinks
-from .db import SCHEMA, LinkDatabase
+from .db import SCHEMA, LinkDatabase, PageStatus
 from .fetcher import LinkFetcher
 from .store import DB_FILE, LinkStore
 
@@ -22,4 +22,5 @@ __all__ = [
     "LinkDatabase",
     "LinkFetcher",
     "LinkStore",
+    "PageStatus",
 ]

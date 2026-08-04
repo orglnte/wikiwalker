@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 
 import wikifetcher
-from link_store import DB_FILE, LinkDatabase
+from link_store import DB_FILE, LinkDatabase, PageStatus
 from settings import DUMPS_URL as BASE_URL
 from wikifetcher import sample_wiki
 
@@ -274,8 +274,9 @@ def build(db_path: str, *, keep_staging: bool = False) -> None:
     with LinkDatabase(db_path) as store:
         store.build_from_staging(MAIN_NAMESPACE)
 
-    pages = conn.execute("SELECT COUNT(*) FROM pages WHERE status='ok'").fetchone()[0]
-    reds = conn.execute("SELECT COUNT(*) FROM pages WHERE status='redlink'").fetchone()[0]
+    counted = "SELECT COUNT(*) FROM pages WHERE status = ?"
+    pages = conn.execute(counted, (PageStatus.ARTICLE,)).fetchone()[0]
+    reds = conn.execute(counted, (PageStatus.REDLINK,)).fetchone()[0]
     edges = conn.execute("SELECT COUNT(*) FROM links").fetchone()[0]
 
     if keep_staging:

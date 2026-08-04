@@ -13,10 +13,21 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Iterable, Iterator
+from enum import StrEnum
 
 from settings import SQLITE_PARAM_BATCH as _PARAM_BATCH
 
-SCHEMA = """
+
+class PageStatus(StrEnum):
+    """The only two values a `pages` row can carry."""
+
+    ARTICLE = "ok"
+    REDLINK = "redlink"
+
+
+_STATUS_VALUES = ", ".join(f"'{status}'" for status in PageStatus)
+
+SCHEMA = f"""
 -- Holds `site`: the same title names different articles on different wikis, so
 -- URLs cannot be rendered without it.
 CREATE TABLE IF NOT EXISTS meta (
@@ -24,14 +35,15 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
--- A row means the title is known. status: 'ok' = article, its edges are in
--- `links`; 'redlink' = linked to, but no article exists. No row = never
--- fetched. Recording red links is what keeps that third case distinct.
+-- A row means the title is known: 'ok' = article, its edges are in `links`;
+-- 'redlink' = linked to, but no article exists. Those are the only two values
+-- a row can carry. Never fetched has no row at all, which is what recording
+-- red links keeps distinct from a dead end.
 CREATE TABLE IF NOT EXISTS pages (
     title      TEXT PRIMARY KEY,
     fetched_at REAL NOT NULL,
     etag       TEXT,          -- for conditional GETs when refreshing
-    status     TEXT NOT NULL DEFAULT 'ok'
+    status     TEXT NOT NULL CHECK (status IN ({_STATUS_VALUES}))
 );
 
 CREATE TABLE IF NOT EXISTS links (
@@ -99,7 +111,7 @@ class LinkDatabase:
                 f"SELECT title, status FROM pages WHERE title IN ({placeholders})",
                 batch,
             ):
-                found[title] = [] if status == "ok" else None
+                found[title] = [] if status == PageStatus.ARTICLE else None
 
             for src, dst in self._conn.execute(
                 f"SELECT src, dst FROM links WHERE src IN ({placeholders}) ORDER BY src, ord",
@@ -112,7 +124,7 @@ class LinkDatabase:
         return found
 
     def stale_titles(
-        self, titles: Iterable[str], max_age_s: float, *, status: str | None = None
+        self, titles: Iterable[str], max_age_s: float, *, status: PageStatus | None = None
     ) -> list[str]:
         """Return the known titles whose record is older than `max_age_s`.
 
@@ -154,26 +166,26 @@ class LinkDatabase:
                 title
                 for (title,) in self._conn.execute(
                     f"SELECT title FROM pages "
-                    f"WHERE status = 'redlink' AND title IN ({placeholders})",
-                    batch,
+                    f"WHERE status = ? AND title IN ({placeholders})",
+                    [PageStatus.REDLINK, *batch],
                 )
             )
 
         return known
 
-    def status(self, title: str) -> str | None:
-        """'ok', 'redlink', or None if the title appears nowhere at all.
+    def status(self, title: str) -> PageStatus | None:
+        """The title's status, or None if it appears nowhere at all.
 
         Single-title counterpart to the batch methods, for a search's endpoints.
         """
         row = self._conn.execute(
             "SELECT status FROM pages WHERE title = ?", (title,)
         ).fetchone()
-        return row[0] if row else None
+        return PageStatus(row[0]) if row else None
 
     def red_link_count(self) -> int:
         return self._conn.execute(
-            "SELECT COUNT(*) FROM pages WHERE status = 'redlink'"
+            "SELECT COUNT(*) FROM pages WHERE status = ?", (PageStatus.REDLINK,)
         ).fetchone()[0]
 
     def store(self, title: str, links: list[str], etag: str | None = None) -> None:
@@ -185,8 +197,8 @@ class LinkDatabase:
         with self._conn:
             self._conn.execute(
                 "INSERT OR REPLACE INTO pages (title, fetched_at, etag, status) "
-                "VALUES (?, ?, ?, 'ok')",
-                (title, time.time(), etag),
+                "VALUES (?, ?, ?, ?)",
+                (title, time.time(), etag, PageStatus.ARTICLE),
             )
             # Replace, not append, so a refresh reflects removed links too.
             self._conn.execute("DELETE FROM links WHERE src = ?", (title,))
@@ -219,13 +231,13 @@ class LinkDatabase:
             self._conn.executemany("DELETE FROM links WHERE src = ?", replaced)
             self._conn.executemany(
                 "INSERT OR REPLACE INTO pages (title, fetched_at, etag, status) "
-                "VALUES (?, ?, NULL, 'ok')",
-                articles,
+                "VALUES (?, ?, NULL, ?)",
+                [(title, at, PageStatus.ARTICLE) for title, at in articles],
             )
             self._conn.executemany(
                 "INSERT OR REPLACE INTO pages (title, fetched_at, etag, status) "
-                "VALUES (?, ?, NULL, 'redlink')",
-                dead,
+                "VALUES (?, ?, NULL, ?)",
+                [(title, at, PageStatus.REDLINK) for title, at in dead],
             )
             self._conn.executemany(
                 "INSERT INTO links (src, dst, ord) VALUES (?, ?, ?)", edges
@@ -261,7 +273,7 @@ class LinkDatabase:
                 -- Every non-redirect article, including ones linking nowhere: a
                 -- snapshot is complete by construction, so no links is knowledge.
                 INSERT INTO pages (title, fetched_at, etag, status)
-                SELECT page_title, strftime('%s', 'now'), NULL, 'ok'
+                SELECT page_title, strftime('%s', 'now'), NULL, '{PageStatus.ARTICLE}'
                 FROM t_page
                 WHERE page_namespace = '{namespace}' AND page_is_redirect = '0';
 
@@ -269,7 +281,7 @@ class LinkDatabase:
                 -- several times over; without them the search cannot tell "no
                 -- such article" from "not looked at yet".
                 INSERT OR IGNORE INTO pages (title, fetched_at, etag, status)
-                SELECT DISTINCT r.title, strftime('%s', 'now'), NULL, 'redlink'
+                SELECT DISTINCT r.title, strftime('%s', 'now'), NULL, '{PageStatus.REDLINK}'
                 FROM t_resolved r
                 WHERE r.title NOT IN (SELECT title FROM pages);
                 """
@@ -286,8 +298,8 @@ class LinkDatabase:
             for title in titles:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO pages (title, fetched_at, etag, status) "
-                    "VALUES (?, ?, NULL, 'redlink')",
-                    (title, now),
+                    "VALUES (?, ?, NULL, ?)",
+                    (title, now, PageStatus.REDLINK),
                 )
                 self._conn.execute("DELETE FROM links WHERE src = ?", (title,))
 
@@ -316,7 +328,7 @@ class LinkDatabase:
     def page_count(self) -> int:
         """Number of real articles. Red links are known titles, not articles."""
         return self._conn.execute(
-            "SELECT COUNT(*) FROM pages WHERE status = 'ok'"
+            "SELECT COUNT(*) FROM pages WHERE status = ?", (PageStatus.ARTICLE,)
         ).fetchone()[0]
 
     def link_count(self) -> int:
