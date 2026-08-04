@@ -61,6 +61,20 @@ class BatchLinks(Mapping[str, "list[str] | None"]):
         for title in list(self._pending):
             self._resolve(title)
 
+    def keep_what_landed(self) -> None:
+        """Write the pages already fetched and abandon the rest.
+
+        A batch submits every title at once and a semaphore holds all but a few
+        back, so most of what is outstanding has not been sent. Waiting on those
+        would start requests nobody is going to read.
+        """
+        for title, future in list(self._pending.items()):
+            if future.done():
+                self._resolve(title)
+            else:
+                future.cancel()
+                del self._pending[title]
+
     def _resolve(self, title: str) -> None:
         future = self._pending.pop(title, None)
         if future is None:
@@ -69,9 +83,11 @@ class BatchLinks(Mapping[str, "list[str] | None"]):
         try:
             links = future.result(timeout=FETCH_TIMEOUT_S)
         except TimeoutError:
+            self._store.note_failure(title, f"timed out after {FETCH_TIMEOUT_S:.0f}s")
             log.warning("fetch timed out: %s", title)
             return
         except Exception as exc:
+            self._store.note_failure(title, f"{type(exc).__name__}: {exc}")
             log.warning("fetch failed: %s (%s: %s)", title, type(exc).__name__, exc)
             return
 

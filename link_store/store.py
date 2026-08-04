@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 
 import logctx
 import wikifetcher
-from settings import DB_FILE, RED_LINK_TTL_S, SITE
+from settings import DB_FILE, FETCH_TIMEOUT_S, RED_LINK_TTL_S, SITE
 
 from .batch import BatchLinks
 from .db import LinkDatabase, PageStatus
@@ -44,6 +44,10 @@ class LinkStore:
     ) -> None:
         self._max_fetched = max_fetched
         self.fetched = 0
+
+        # Why a title could not be read, when something went wrong reading it.
+        # A title absent from here was never attempted.
+        self.failures: dict[str, str] = {}
         self._db = LinkDatabase(DB_FILE.get(name, name))
         self._fetcher = (
             LinkFetcher(fetcher(SITE.get(name)), concurrency=concurrency)
@@ -66,6 +70,11 @@ class LinkStore:
     @property
     def site(self) -> str | None:
         return self._db.get_meta("site")
+
+    @property
+    def budget_spent(self) -> bool:
+        """Whether the fetch budget is used up, so nothing more can be read."""
+        return self._max_fetched is not None and self.fetched >= self._max_fetched
 
     def page_count(self) -> int:
         return self._db.page_count()
@@ -114,11 +123,35 @@ class LinkStore:
         self._open = BatchLinks(self, known, pending)
         return self._open
 
+    def fetch_page(self, title: str) -> list[str] | None:
+        """Retrieve one page now and record what came back.
+
+        For the odd title wanted on its own — a search's endpoints — rather than
+        a frontier. Returns its links, or None for no article and for a read
+        that failed; `failures` tells those two apart.
+        """
+        if self._fetcher is None or self.budget_spent:
+            return None
+
+        self.fetched += 1
+        future = self._fetcher.submit([title])[title]
+        try:
+            links = future.result(timeout=FETCH_TIMEOUT_S)
+        except TimeoutError:
+            self.note_failure(title, f"timed out after {FETCH_TIMEOUT_S:.0f}s")
+            return None
+        except Exception as exc:
+            self.note_failure(title, f"{type(exc).__name__}: {exc}")
+            return None
+
+        self.write(title, links)
+        return links
+
     def status(self, title: str) -> PageStatus | None:
         """The title's status, or None if it is unknown — retrieving first."""
         known = self._db.status(title)
         if known is None and self._fetcher is not None:
-            self.get_links([title]).get(title)
+            self.fetch_page(title)
             known = self._db.status(title)
         return known
 
@@ -129,6 +162,10 @@ class LinkStore:
         when some other page does.
         """
         return STATE[self.status(title)]
+
+    def note_failure(self, title: str, reason: str) -> None:
+        """Record why a retrieval failed, so a caller can say more than 'unknown'."""
+        self.failures[title] = reason
 
     def write(self, title: str, links: list[str] | None) -> None:
         """Record what a retrieval found. Called by the batch as pages land."""
@@ -166,8 +203,11 @@ class LinkStore:
         self._db.set_meta(key, value)
 
     def close(self) -> None:
+        """Keep the pages that landed; do not wait for the ones queued behind
+        them. The walk is over — by an answer, a budget or a Ctrl-C — so a page
+        still waiting its turn has no reader left."""
         if self._open is not None:
-            self._open.drain()
+            self._open.keep_what_landed()
         if self._fetcher is not None:
             self._fetcher.close()
         self._db.close()

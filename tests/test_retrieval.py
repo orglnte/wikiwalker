@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+from concurrent.futures import Future
 
 import pytest
 
-from link_store import LinkFetcher, LinkStore
+from link_store import BatchLinks, LinkFetcher, LinkStore
 from walker import Walker
 
 
@@ -110,6 +111,21 @@ def test_pages_fetched_but_never_asked_for_are_still_kept() -> None:
         batch.drain()
 
         assert store.link_count() == 3
+
+
+def test_closing_keeps_the_pages_that_landed_and_drops_the_queued() -> None:
+    """A batch submits every title at once and a semaphore holds most of them
+    back. Waiting on those would send requests the walk will never read."""
+    landed: Future = Future()
+    landed.set_result(["X"])
+    queued: Future = Future()
+
+    with LinkStore(":memory:") as store:
+        BatchLinks(store, {}, {"Landed": landed, "Queued": queued}).keep_what_landed()
+
+        assert store.get_links(["Landed"]).get("Landed") == ["X"]
+        assert store.status("Queued") is None
+        assert queued.cancelled()
 
 
 def test_a_batch_mixes_held_and_retrieved_pages() -> None:

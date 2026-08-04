@@ -54,8 +54,22 @@ class LinkFetcher:
         }
 
     def close(self) -> None:
+        # Cancelled tasks have to be given a turn on the loop to notice it. Stop
+        # the loop first and asyncio reports them as destroyed while pending.
+        try:
+            asyncio.run_coroutine_threadsafe(self._abandon(), self._loop).result(timeout=5)
+        except (TimeoutError, RuntimeError):
+            log.debug("fetcher did not settle before close")
+
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
+
+    async def _abandon(self) -> None:
+        """Cancel whatever is still running, and wait for it to unwind."""
+        running = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
 
     async def _make_limit(self) -> asyncio.Semaphore:
         # Built on the loop's own thread; a Semaphore binds to the running loop.
