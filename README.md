@@ -8,6 +8,7 @@ Finds the shortest path between two Wikipedia articles by following internal lin
 mkvirtualenv wikiwalker -a "$PWD" -p /opt/local/bin/python3.14t
 pip install -e ".[dev]"
 pytest
+pytest -m live   # 70s, runs the fetcher links retrieval test vs API results
 ```
 
 ```bash
@@ -52,7 +53,7 @@ python3 walker.py read-only April Nigeria
 python3 walker.py read-only "South West England" "Walton Cardiff"
 ```
 
-### Read-through walkthrough
+### Read-through demo
 
 Forget one page, then watch the same walk answer from the network instead of disk.
 
@@ -67,10 +68,8 @@ python3 walker.py crawl --db simplewiki Bristol Cheese -v > run_2.log 2>&1
 diff run_1.log run_2.log
 ```
 
-Same path either way, but with the hole the walk expands **127 pages instead of
-25** and refuses to call the result shortest. The crawl then refills it from the
-live wiki — and the live page has 78 links where the dump had 91 (or should...),
-because it has been edited since the snapshot.
+Probably there is a difference in total links for the page forgotten and then re-crawled
+since the first one is from a past snapshot.
 
 ### Crawling live Wikipedia
 
@@ -91,7 +90,8 @@ held, otherwise it asks a `Fetcher` for them. The fetcher retrieves the page —
 over HTTP, or from a local sample wiki for tests — and extracts its links; the
 store never sees HTML. The db, the network and the parsing are all encapsulated,
 and none of that complexity reaches the `Walker`. The db is also what lets a
-walk stop and restart, or recover from a crash or a network outage.
+walk stop and restart, or recover from a crash or a network outage. By definition,
+the walk is over "stratified" data (layered in time).
 
 `LinkStore.get_links` returns a `BatchLinks` object: one mapping over the pages
 the store already holds and the ones still arriving, so the `Walker` iterates it
@@ -118,20 +118,17 @@ simple.wikipedia.org has been added to facilitate tests (approx. 60 links per pa
 
 ### LinkStore
 
-1. An article, once stored, is **never refreshed**. The only refresh rule covers
+1. *Read skew*: a walk spans thousands of pages read at different instants, so
+   the graph it traverses may never have existed as a whole. Whether a page is a red link,
+   an orphan or an article is a past observation stored in the walks table.
+2. An article, once stored, is **never refreshed**. The only refresh rule covers
    red links, re-checked after 24h (`LinkStore.get_links`).
-2. `BatchLinks.drain()` — when looking for the shortest path first, it should
-   arguably be cancelled rather than drained.
-3. *Eventual consistency*: never a snapshot consistent at a given time. Whether
-   a page is a red link, an orphan or an article is a past observation, so it
-   may be stale. That state belongs in the walks table, not on the page.
-4. Red links vs transient errors: TBD.
+3. *Red links are eventually consistent*, with a 24h period. Articles are not:
+   once stored they are never re-read, so the store has no mechanism to converge on them.
+   Red links vs transient errors: TBD.
+4. `BatchLinks.drain()` collects the pages of the current batch even if the batch iteration is
+    stopped. (*TODO impact on large batches*)
 
-### data_cli
-
-1. `wikiparse-rs` for SQL → SQLite. `wikiwalk` / `wiki-graph` are full
-   solutions, deliberately avoided.
-2. Did not look at `wikiwalk`'s OO design, to build my own interpretation.
 
 ### Fetcher
 
@@ -158,11 +155,31 @@ Parser reliability:
 4. Category pages are filtered out, being giant hubs rather than article links —
    by `id="mw-content-text"`, and by name prefix within the content div.
 
+Even if a certain level of imperfection for link extraction is probably acceptable,
+there is a unit test that compares results from API and from Fetcher to make sure
+it divergence is <= 0.75% (pytest -m live).
+
+
+### data_cli
+
+1. `wikiparse-rs` for SQL → SQLite. `wikiwalk` / `wiki-graph` are full
+   solutions, deliberately avoided.
+2. Did not look at `wikiwalk`'s OO design, to build my own interpretation.
+
+
 ## TODO
 
-1. Whether `extract_links` works on current en.wikipedia rendering. Only the
-   sample wiki and simplewiki dumps have been exercised.
-2. Redirect resolution emits duplicate edges — inflates `link_count()`, would
-   skew most-frequent counts.
 3. Whether 1 req/s clears Wikimedia's limits for `/wiki/` HTML. It comes from
    their general guidance, not a published number. On a 429, link to the policy.
+2. Redirect resolution emits duplicate edges — inflates `link_count()`, would
+   skew most-frequent counts.
+
+
+    def __iter__(self) -> Iterator[str]:
+        self.drain()
+        return iter(self._known)
+
+
++ test wikipedia walk, con opzioni per rps / concurrency
+
+

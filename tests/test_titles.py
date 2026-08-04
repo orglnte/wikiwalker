@@ -35,9 +35,24 @@ def test_every_href_form_a_wiki_serves_is_understood() -> None:
         assert from_href(href, SITE) == "Bristol", href
 
 
-def test_fragments_and_queries_collapse_to_the_same_title() -> None:
-    assert from_href("/wiki/Bristol", SITE) == "Bristol"
-    assert from_href("/wiki/Bristol#History", SITE) is None
+def test_a_link_to_a_section_is_a_link_to_the_article() -> None:
+    """Wikipedia writes a great many of its links this way. Dropping them
+    costs the search edges it should follow, silently."""
+    for href in (
+        "/wiki/Bristol#History",
+        "./Bristol#History",
+        "https://en.wikipedia.org/wiki/Bristol#History",
+        "//en.wikipedia.org/wiki/Bristol#Etymology_and_early_history",
+    ):
+        assert from_href(href, SITE) == "Bristol", href
+
+
+def test_a_section_link_into_another_wiki_is_still_not_this_wikis() -> None:
+    assert from_href("https://it.wikipedia.org/wiki/Bristol#Storia", SITE) is None
+
+
+def test_a_section_link_to_a_non_article_namespace_is_still_rejected() -> None:
+    assert from_href("/wiki/Help:Contents#Top", SITE) is None
 
 
 def test_another_wikis_link_is_not_a_link_on_this_one() -> None:
@@ -58,7 +73,14 @@ def test_a_colon_in_a_real_title_is_not_a_namespace() -> None:
 
 
 def test_a_red_link_href_is_not_an_article_link() -> None:
-    assert from_href("/w/index.php?title=X&action=edit&redlink=1", SITE) is None
+    """Both forms a wiki serves. The second differs from an ordinary link only
+    by its query string, so a pattern that ignores queries would follow it."""
+    for href in (
+        "/w/index.php?title=X&action=edit&redlink=1",
+        "/wiki/X?action=edit&redlink=1",
+        "//en.wikipedia.org/wiki/X?action=edit&redlink=1",
+    ):
+        assert from_href(href, SITE) is None, href
 
 
 def test_url_and_display_forms_round_trip() -> None:

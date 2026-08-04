@@ -43,10 +43,11 @@ NON_ARTICLE_NAMESPACES = frozenset(
 #   https://en.wikipedia.org/wiki/Bristol  parsoid, absolute
 #   //en.wikipedia.org/wiki/Bristol        protocol-relative
 #
-# Red links (`/w/index.php?title=X&action=edit&redlink=1`) match none of these
-# and are dropped: there is no article behind them.
-_PATH_HREF = re.compile(r"^(?:\./|/wiki/)(?P<title>[^#?]+)$")
-_ABSOLUTE_HREF = re.compile(r"^(?:https?:)?//(?P<host>[^/]+)/wiki/(?P<title>[^#?]+)$")
+# A trailing `#section` is part of the same article, so it is stripped. A query
+# string is not: red links carry one (`?action=edit&redlink=1`) and there is no
+# article behind them, so an href holding one matches nothing.
+_PATH_HREF = re.compile(r"^(?:\./|/wiki/)(?P<title>[^#?]+)(?:#.*)?$")
+_ABSOLUTE_HREF = re.compile(r"^(?:https?:)?//(?P<host>[^/]+)/wiki/(?P<title>[^#?]+)(?:#.*)?$")
 
 
 def canonical(title: str) -> str:
@@ -67,8 +68,7 @@ def from_href(href: str, site: str = DEFAULT_SITE) -> str | None:
         if match is None or match.group("host") != site:
             return None
 
-    # Fragments and queries are excluded by the patterns, so `/wiki/Bristol`
-    # and `/wiki/Bristol#History` collapse to one title.
+    # `/wiki/Bristol` and `/wiki/Bristol#History` collapse to one title.
     title = unquote(match.group("title"))
 
     prefix, sep, _ = title.partition(":")

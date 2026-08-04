@@ -20,7 +20,9 @@ packages = ["link_store", "wikifetcher"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -q"
+# `live` reaches en.wikipedia.org, so it is opt-in: `pytest -m live`.
+addopts = "-ra -q -m 'not live'"
+markers = ["live: reads real pages over the network"]
 
 [tool.ruff]
 line-length = 100

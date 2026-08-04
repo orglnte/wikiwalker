@@ -32,15 +32,16 @@ DUMPS_URL = "https://dumps.wikimedia.org"
 # How hard we are willing to hit a wiki
 #
 # Two separate limits. Concurrency is how many requests may be outstanding;
-# the interval is how often one may leave. Ten at once with no interval is ten
-# per second, which earns a 429 — Wikimedia publishes dumps precisely so that
-# nobody scrapes at that rate.
+# the interval is how often one may leave. Wikimedia publishes no rate for
+# article HTML — robots.txt sets a crawl delay for one named bot and otherwise
+# asks that bots be "low-speed" — so the interval below is a choice, not a
+# quoted figure, and `--max-rps` exists to lower it.
 # --------------------------------------------------------------------------
 
 USER_AGENT = "wikiwalker/0.1 (https://github.com/orglnte/wikiwalker)"
 
 MAX_CONCURRENCY = 10
-MIN_REQUEST_INTERVAL_S = 1.0
+MIN_REQUEST_INTERVAL_S = 0.1
 
 HTTP_TIMEOUT_S = 30.0
 HTTP_RETRIES = 3

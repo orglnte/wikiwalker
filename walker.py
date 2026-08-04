@@ -217,15 +217,19 @@ class Walker:
                             time.monotonic() - started, unread,
                         )
 
+                    # NOTE this call blocks until the page is fetched (if not in db)
                     outgoing_links = links.get(page, UNKNOWN)
 
                     if outgoing_links is UNKNOWN:
                         # Could not be read: a gap in a dump, a failed fetch in
                         # a crawl. Either way the walk is not exhaustive.
-                        unread.add(page) # NOTE to be decided if retry or not, if sleep/wait or not
+                        # NOTE to be defined if retry or not, if sleep/wait or not
+                        # if you re-crawl manually, it will retry only the failed fetches.
+                        unread.add(page)
                         in_batch["unread"] += 1
                         continue
 
+                    # TODO is this red links?
                     if outgoing_links is None:
                         # No article behind the title. A real dead end, and it
                         # costs the answer nothing.
@@ -293,6 +297,7 @@ class Walker:
 
 def _reconstruct(parent: dict[str, str | None], target: str) -> list[str]:
     """Walk the parent chain from `target` back to the source, then reverse it."""
+    # TODO examples
     path = [target]
     page = parent[target]
     while page is not None:
