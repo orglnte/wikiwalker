@@ -2,11 +2,27 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from settings import MAX_CONCURRENCY, USER_AGENT
 
-__all__ = ["MAX_CONCURRENCY", "USER_AGENT", "Fetcher"]
+__all__ = ["MAX_CONCURRENCY", "USER_AGENT", "Fetcher", "Page"]
+
+
+@dataclass(frozen=True)
+class Page:
+    """What one retrieval found.
+
+    `title` is what the fetch landed on, which is not always what was asked
+    for: a title can redirect, and several can lead to the same article.
+    `aliases` are the titles passed through on the way, so the caller can
+    record them rather than fetch them again.
+    """
+
+    title: str
+    links: list[str] | None
+    aliases: list[str] = field(default_factory=list)
 
 
 class Fetcher(Protocol):
@@ -18,8 +34,9 @@ class Fetcher(Protocol):
 
     site: str
 
-    async def fetch(self, title: str) -> list[str] | None:
-        """The page's outgoing links, or None when no article exists.
+    async def fetch(self, title: str) -> Page:
+        """The page the title leads to, its links, and any titles redirecting
+        to it. `Page.links` is None when no article exists.
 
         Raises when the page could not be read at all — a different thing from
         an article not existing, and only the fetcher can tell them apart.

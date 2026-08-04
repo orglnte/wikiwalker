@@ -19,10 +19,11 @@ from settings import SQLITE_PARAM_BATCH as _PARAM_BATCH
 
 
 class PageStatus(StrEnum):
-    """The only two values a `pages` row can carry."""
+    """The only values a `pages` row can carry."""
 
     ARTICLE = "ok"
     REDLINK = "redlink"
+    REDIRECT = "redirect"
 
 
 _STATUS_VALUES = ", ".join(f"'{status}'" for status in PageStatus)
@@ -36,14 +37,18 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 -- A row means the title is known: 'ok' = article, its edges are in `links`;
--- 'redlink' = the title was checked and no article exists. Those are the values
--- a row can carry. Never fetched has no row at all, which is what recording
--- red links keeps distinct from a dead end.
+-- 'redlink' = the title was checked and no article exists; 'redirect' = another
+-- title names the same article, which `redirect_to` gives. Never fetched has no
+-- row at all, which is what recording red links keeps distinct from a dead end.
 CREATE TABLE IF NOT EXISTS pages (
-    title      TEXT PRIMARY KEY,
-    fetched_at REAL NOT NULL,
-    etag       TEXT,          -- for conditional GETs when refreshing
-    status     TEXT NOT NULL CHECK (status IN ({_STATUS_VALUES}))
+    title       TEXT PRIMARY KEY,
+    fetched_at  REAL NOT NULL,
+    etag        TEXT,          -- for conditional GETs when refreshing
+    status      TEXT NOT NULL CHECK (status IN ({_STATUS_VALUES})),
+
+    -- Set only on 'redirect', and followed exactly one hop, as a wiki does.
+    -- A redirect naming a redirect is served as that page, not followed on.
+    redirect_to TEXT
 );
 
 CREATE TABLE IF NOT EXISTS links (
@@ -98,21 +103,50 @@ class LinkDatabase:
             [...]    an article, and these are its links (empty = links nowhere)
             None     no article behind this title
             absent   never fetched
+
+        A redirect answers with what it points at. Following it is not a step:
+        a link to a redirect lands on the article in one click, so counting it
+        as a hop would make every path through one come out too long.
+
+        Exactly one hop, as a wiki does. A redirect naming another redirect is
+        served as that second page rather than followed on, so a reader gets
+        the same one link out of it that we do.
         """
         wanted = list(titles)
+        answers: dict[str, str] = {}            # title -> the title holding its links
         found: dict[str, list[str] | None] = {}
 
         for batch in _batches(wanted, _PARAM_BATCH):
             placeholders = ",".join("?" * len(batch))
-
-            # From `pages` first, so an article with no links still gets an
-            # entry; `links` alone would omit it.
-            for title, status in self._conn.execute(
-                f"SELECT title, status FROM pages WHERE title IN ({placeholders})",
+            for title, status, destination in self._conn.execute(
+                f"SELECT title, status, redirect_to FROM pages WHERE title IN ({placeholders})",
                 batch,
             ):
+                if status == PageStatus.REDIRECT and destination:
+                    answers[title] = destination
+                    continue
+
+                answers[title] = title
+                # From `pages` first, so an article with no links still gets an
+                # entry; `links` alone would omit it.
                 found[title] = [] if status == PageStatus.ARTICLE else None
 
+        # What a redirect names may not have been asked for, and may not be held
+        # at all — in which case the redirect reads as absent, like it. Landing
+        # on a second redirect spends the hop: its page is the one link it holds.
+        for batch in _batches(sorted(set(answers.values()) - set(found)), _PARAM_BATCH):
+            placeholders = ",".join("?" * len(batch))
+            for title, status, destination in self._conn.execute(
+                f"SELECT title, status, redirect_to FROM pages WHERE title IN ({placeholders})",
+                batch,
+            ):
+                if status == PageStatus.REDIRECT:
+                    found[title] = [destination] if destination else []
+                else:
+                    found[title] = [] if status == PageStatus.ARTICLE else None
+
+        for batch in _batches(sorted(found), _PARAM_BATCH):
+            placeholders = ",".join("?" * len(batch))
             for src, dst in self._conn.execute(
                 f"SELECT src, dst FROM links WHERE src IN ({placeholders}) ORDER BY src, ord",
                 batch,
@@ -121,7 +155,11 @@ class LinkDatabase:
                 if links is not None:
                     links.append(dst)
 
-        return found
+        return {
+            title: found[held]
+            for title, held in answers.items()
+            if held in found
+        }
 
     def stale_titles(
         self, titles: Iterable[str], max_age_s: float, *, status: PageStatus | None = None
@@ -286,6 +324,30 @@ class LinkDatabase:
                 WHERE r.title NOT IN (SELECT title FROM pages);
                 """
             )
+
+    def mark_redirects(self, aliases: Iterable[str], destination: str) -> None:
+        """Record that these titles all name `destination`.
+
+        Their own edges go: a redirect has none of its own, and a title that
+        used to be an article can become one.
+        """
+        now = time.time()
+        with self._conn:
+            for alias in aliases:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO pages "
+                    "(title, fetched_at, etag, status, redirect_to) VALUES (?, ?, NULL, ?, ?)",
+                    (alias, now, PageStatus.REDIRECT, destination),
+                )
+                self._conn.execute("DELETE FROM links WHERE src = ?", (alias,))
+
+    def destination(self, title: str) -> str | None:
+        """What this title redirects to, or None if it is not a redirect."""
+        row = self._conn.execute(
+            "SELECT redirect_to FROM pages WHERE title = ? AND status = ?",
+            (title, PageStatus.REDIRECT),
+        ).fetchone()
+        return row[0] if row else None
 
     def mark_red_links(self, titles: Iterable[str]) -> None:
         """Record that these titles have no article behind them (e.g. a 404).

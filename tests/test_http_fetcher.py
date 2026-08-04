@@ -16,6 +16,7 @@ import time
 import httpx
 import pytest
 
+from wikifetcher.html_links import read_page
 from wikifetcher.http import (
     HttpFetcher,
     PageUnavailable,
@@ -30,6 +31,15 @@ PAGE = """<html><body>
 <div id="mw-content-text"><div class="mw-parser-output">
 <p><a href="/wiki/England">England</a> <a href="/wiki/Somerset">Somerset</a></p>
 <p><a href="/wiki/Help:Contents">help</a></p>
+</div></div>
+</body></html>"""
+
+
+REDIRECTED = """<html><head>
+<link rel="canonical" href="https://en.wikipedia.org/wiki/United_Kingdom"/>
+</head><body>
+<div id="mw-content-text"><div class="mw-parser-output">
+<p><a href="/wiki/England">England</a> <a href="/wiki/Wales">Wales</a></p>
 </div></div>
 </body></html>"""
 
@@ -52,14 +62,14 @@ def run(coro):
 def test_a_page_yields_its_content_links_only() -> None:
     f = fetcher(lambda request: httpx.Response(200, text=PAGE))
 
-    assert run(f.fetch("Bristol")) == ["England", "Somerset"]
+    assert run(f.fetch("Bristol")).links == ["England", "Somerset"]
 
 
 def test_a_404_means_no_article() -> None:
     """The one status that is an answer rather than a failure."""
     f = fetcher(lambda request: httpx.Response(404))
 
-    assert run(f.fetch("Zzz")) is None
+    assert run(f.fetch("Zzz")).links is None
 
 
 def test_a_server_error_is_never_mistaken_for_a_missing_article() -> None:
@@ -82,6 +92,61 @@ def test_a_timeout_is_never_mistaken_for_a_missing_article() -> None:
 
 
 # --------------------------------------------------------------------------
+# Redirects
+# --------------------------------------------------------------------------
+
+def test_a_redirect_is_recognised_from_the_page_not_the_response() -> None:
+    """A wiki serves the target's HTML under the redirect's own URL, with no
+    3xx and nothing in the response history. Only the page says which article
+    it is, so reading the response alone records the alias as an article."""
+    seen = []
+
+    def serve(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, text=REDIRECTED)
+
+    page = run(fetcher(serve).fetch("UK"))
+
+    assert seen == ["https://en.wikipedia.org/wiki/UK"]      # no redirect followed
+    assert page.title == "United_Kingdom"
+    assert page.aliases == ["UK"]
+    assert page.links == ["England", "Wales"]
+
+
+def test_a_page_that_is_itself_claims_no_alias() -> None:
+    def serve(request):
+        return httpx.Response(200, text=REDIRECTED)
+
+    page = run(fetcher(serve).fetch("United_Kingdom"))
+
+    assert page.title == "United_Kingdom"
+    assert page.aliases == []
+
+
+def test_a_page_without_a_canonical_link_keeps_the_title_asked_for() -> None:
+    """Nothing guarantees the tag is there, and a missing one is not a
+    redirect — it just means the page did not say."""
+    page = run(fetcher(lambda request: httpx.Response(200, text=PAGE)).fetch("Bristol"))
+
+    assert page.title == "Bristol"
+    assert page.aliases == []
+
+
+def test_the_canonical_title_comes_out_of_the_head() -> None:
+    canonical, links = read_page(REDIRECTED, site=SITE)
+
+    assert canonical == "United_Kingdom"
+    assert links == ["England", "Wales"]
+
+
+def test_a_canonical_link_to_another_wiki_is_not_this_pages_title() -> None:
+    """Same rule as any other href: the host is what tells them apart."""
+    elsewhere = REDIRECTED.replace("en.wikipedia.org", "de.wikipedia.org")
+
+    assert read_page(elsewhere, site=SITE)[0] is None
+
+
+# --------------------------------------------------------------------------
 # Retrying
 # --------------------------------------------------------------------------
 
@@ -96,7 +161,7 @@ def test_a_transient_error_is_retried_then_succeeds() -> None:
 
     f = fetcher(flaky, retries=3)
 
-    assert run(f.fetch("Bristol")) == ["England", "Somerset"]
+    assert run(f.fetch("Bristol")).links == ["England", "Somerset"]
     assert len(attempts) == 3
 
 
@@ -128,7 +193,7 @@ def test_a_429_pauses_and_then_retries() -> None:
 
     f = fetcher(scripted, retries=3)
 
-    assert run(f.fetch("Bristol")) == ["England", "Somerset"]
+    assert run(f.fetch("Bristol")).links == ["England", "Somerset"]
 
 
 def test_a_429_sets_a_pause_rather_than_failing_the_page() -> None:
@@ -171,7 +236,7 @@ def test_chrome_and_non_article_links_are_left_out() -> None:
     """`Chrome` sits outside the content div, `Help:` is not an article."""
     f = fetcher(lambda request: httpx.Response(200, text=PAGE))
 
-    links = run(f.fetch("Bristol"))
+    links = run(f.fetch("Bristol")).links
 
     assert "Chrome" not in links
     assert "Help:Contents" not in links
@@ -241,7 +306,7 @@ def test_one_page_failing_does_not_stop_the_others() -> None:
 
     with pytest.raises(PageUnavailable):
         run(f.fetch("Bristol"))
-    assert run(f.fetch("Bath")) == ["England", "Somerset"]
+    assert run(f.fetch("Bath")).links == ["England", "Somerset"]
 
 
 def test_enough_failures_in_a_row_stop_the_fetcher() -> None:
@@ -279,7 +344,7 @@ def test_a_success_clears_the_failure_run() -> None:
     for _ in range(2):
         with pytest.raises(PageUnavailable):
             run(f.fetch("X"))
-    assert run(f.fetch("X")) == ["England", "Somerset"]
+    assert run(f.fetch("X")).links == ["England", "Somerset"]
     for _ in range(2):
         with pytest.raises(PageUnavailable):
             run(f.fetch("X"))

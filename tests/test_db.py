@@ -138,6 +138,49 @@ def test_a_dump_load_separates_articles_from_the_titles_they_link_to(
 
 
 # --------------------------------------------------------------------------
+# Redirects
+# --------------------------------------------------------------------------
+
+def test_a_redirect_answers_with_the_article_it_names(sql: LinkDatabase) -> None:
+    """And without costing a step: a link to a redirect lands on the article
+    in one click, so counting it would make paths through one come out long."""
+    sql.store("United_Kingdom", ["London", "Wales"])
+    sql.mark_redirects(["UK"], "United_Kingdom")
+
+    assert sql.get_links(["UK"]) == {"UK": ["London", "Wales"]}
+
+
+def test_a_redirect_to_a_redirect_stops_at_the_second(sql: LinkDatabase) -> None:
+    """A wiki serves the first destination rather than following on, so the
+    second redirect is a page holding a single link — one more click."""
+    sql.store("Cheese", ["Milk"])
+    sql.mark_redirects(["Cheddar"], "Cheese")
+    sql.mark_redirects(["Chedder"], "Cheddar")
+
+    # Chedder lands on Cheddar's page, which offers one link onwards.
+    assert sql.get_links(["Chedder"]) == {"Chedder": ["Cheese"]}
+    assert sql.get_links(["Cheddar"]) == {"Cheddar": ["Milk"]}
+
+
+def test_a_redirect_to_something_unread_reads_as_unread(sql: LinkDatabase) -> None:
+    sql.mark_redirects(["UK"], "United_Kingdom")
+
+    assert sql.get_links(["UK"]) == {}
+
+
+def test_marking_a_redirect_drops_the_edges_it_had(sql: LinkDatabase) -> None:
+    """A title that was an article and is now a redirect must not keep links
+    of its own, or the search walks out of a page that no longer has them."""
+    sql.store("UK", ["Somewhere"])
+
+    sql.mark_redirects(["UK"], "United_Kingdom")
+
+    assert sql.status("UK") == "redirect"
+    assert sql.destination("UK") == "United_Kingdom"
+    assert sql.link_count() == 0
+
+
+# --------------------------------------------------------------------------
 # Counting
 # --------------------------------------------------------------------------
 

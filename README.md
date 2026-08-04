@@ -132,8 +132,16 @@ simple.wikipedia.org has been added to facilitate tests (approx. 60 links per pa
 
 ### Fetcher
 
+A page has 3 possible states, 'article', 'notfound' (-> 'redlink'), 'failed' or 'redirect'.
+When it's fetched, an article is found.
+When a link points to it and it's notfound, it is changed to redlink (SHOULD WE DO IT?).
+
+Redirect(s) work as on Wikipedia. A -> B returns B and does not count the extra hop.
+If A -> B -> C: B is returned, and so the extra hop is counted.
+
 1. Concurrency of 10 is against Wikipedia's policies and might get you banned,
-   so requests are also paced — at most one per second by default.
+   so requests are also paced, 10 rps by default.
+
 2. `429` is a **global pause**, not a per-request retry:
 
    ```
@@ -162,15 +170,15 @@ it divergence is <= 0.75% (pytest -m live).
 
 ### data_cli
 
-1. `wikiparse-rs` for SQL → SQLite. `wikiwalk` / `wiki-graph` are full
-   solutions, deliberately avoided.
+1. `wikiparse-rs` for SQL → SQLite. `wikiwalk` / `wiki-graph` are full solutions,
+    deliberately avoided.
 2. Did not look at `wikiwalk`'s OO design, to build my own interpretation.
 
 
 ## TODO
 
-2. Redirect resolution emits duplicate edges — inflates `link_count()`, would
-   skew most-frequent counts.
+
++ wtf
 
     def __iter__(self) -> Iterator[str]:
         self.drain()
@@ -184,4 +192,9 @@ it divergence is <= 0.75% (pytest -m live).
 + topK  shortest paths
         article names
 
+Top 5 shortest paths - refers to the first 5 found shortest paths between a source and a target
+
+
+test mode, reads locally, from the filesystem, not from python memory?
+    is memory regenerated each time?
 

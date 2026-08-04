@@ -22,12 +22,14 @@ _CONTENT_DIV_ID = "mw-content-text"
 
 
 class ArticleLinkParser(HTMLParser):
-    """Collects the article titles linked from a page.
+    """Reads what a page says about itself: which article it is, and what it
+    links to.
 
     Usage:
         parser = ArticleLinkParser()
         parser.feed(html)
-        parser.links  # -> ["South_West_England", "Gloucestershire", ...]
+        parser.canonical  # -> "United_Kingdom"
+        parser.links      # -> ["South_West_England", "Gloucestershire", ...]
     """
 
     def __init__(self, *, site: str = DEFAULT_SITE, content_only: bool = True) -> None:
@@ -49,11 +51,21 @@ class ArticleLinkParser(HTMLParser):
         # one page produce the same ordering.
         self._links: dict[str, None] = {}
 
+        # The article this page really is. A wiki serves a redirect's target
+        # under the redirect's own URL, so the address asked for does not say.
+        self.canonical: str | None = None
+
     @property
     def links(self) -> list[str]:
         return list(self._links)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "link":
+            values = dict(attrs)
+            if values.get("rel") == "canonical" and values.get("href"):
+                self.canonical = from_href(values["href"], self._site)
+            return
+
         if tag == "div":
             if self._in_content:
                 self._div_depth += 1
@@ -82,14 +94,25 @@ class ArticleLinkParser(HTMLParser):
                 self._in_content = False
 
 
+def read_page(
+    html: str, *, site: str = DEFAULT_SITE, content_only: bool = True
+) -> tuple[str | None, list[str]]:
+    """The article `html` is, and the titles it links to in first-seen order.
+
+    The first is None when the page does not name itself, which the sample wiki
+    and any hand-written fixture will not.
+    """
+    parser = ArticleLinkParser(site=site, content_only=content_only)
+    parser.feed(html)
+    parser.close()
+    return parser.canonical, parser.links
+
+
 def extract_links(
     html: str, *, site: str = DEFAULT_SITE, content_only: bool = True
 ) -> list[str]:
     """Return the article titles linked from `html`, in first-seen order."""
-    parser = ArticleLinkParser(site=site, content_only=content_only)
-    parser.feed(html)
-    parser.close()
-    return parser.links
+    return read_page(html, site=site, content_only=content_only)[1]
 
 
 if __name__ == "__main__":

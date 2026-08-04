@@ -14,12 +14,14 @@ from settings import (
     HTTP_TIMEOUT_S,
     MAX_CONSECUTIVE_FAILURES,
     MAX_RATE_LIMIT_PAUSES,
+    MAX_REDIRECTS,
     MIN_REQUEST_INTERVAL_S,
     RETRYABLE_STATUS,
     USER_AGENT,
 )
 
-from .html_links import extract_links
+from .base import Page
+from .html_links import read_page
 from .titles import DEFAULT_SITE, to_url
 
 log = logging.getLogger(__name__)
@@ -56,7 +58,9 @@ class HttpFetcher:
         min_interval_s: float = MIN_REQUEST_INTERVAL_S,
         failure_limit: int | None = MAX_CONSECUTIVE_FAILURES,
         pause_limit: int = MAX_RATE_LIMIT_PAUSES,
+        max_redirects: int = MAX_REDIRECTS,
     ) -> None:
+        self._max_redirects = max_redirects
         self._failure_limit = failure_limit
         self._failures = 0
         self._pause_limit = pause_limit
@@ -72,20 +76,20 @@ class HttpFetcher:
         self._pace_lock = asyncio.Lock()
         self._last_sent = 0.0
 
-    async def fetch(self, title: str) -> list[str] | None:
+    async def fetch(self, title: str) -> Page:
         # One 429 stops the whole fetcher. Ten requests each backing off on
         # their own is not backing off.
         if self._stopped:
             raise RateLimited(f"{title}: not sent, the fetcher has stopped")
 
         try:
-            links = await self._read(title)
+            page = await self._read(title)
         except PageUnavailable:
             self._note_failure()
             raise
 
         self._failures = 0
-        return links
+        return page
 
     def _note_failure(self) -> None:
         """One page failing is that page's problem; a run of them is the site's."""
@@ -100,7 +104,7 @@ class HttpFetcher:
         )
         raise SiteUnreachable(f"{self._failures} consecutive failures")
 
-    async def _read(self, title: str) -> list[str] | None:
+    async def _read(self, title: str) -> Page:
         client = self._ensure_client()
         url = to_url(title, self.site)
 
@@ -116,7 +120,7 @@ class HttpFetcher:
 
             if response.status_code == 404:
                 log.debug("        GET %s -> 404", title)
-                return None
+                return Page(title, None)
 
             if response.status_code == 429:
                 self._hold_off(response.headers.get("retry-after"))
@@ -132,9 +136,19 @@ class HttpFetcher:
                 raise PageUnavailable(f"{title}: HTTP {response.status_code}")
 
             html = response.text
-            links = await asyncio.to_thread(extract_links, html, site=self.site)
-            log.debug("        GET %s -> %dB, %d link(s)", title, len(html), len(links))
-            return links
+            canonical, links = await asyncio.to_thread(read_page, html, site=self.site)
+
+            # A wiki serves a redirect's target under the redirect's own URL,
+            # so only the page itself says which article this is.
+            landed = canonical or title
+            aliases = [] if landed == title else [title]
+
+            log.debug(
+                "        GET %s -> %dB, %d link(s)%s",
+                title, len(html), len(links),
+                f", which is {landed}" if aliases else "",
+            )
+            return Page(landed, links, aliases)
 
         raise PageUnavailable(title)  # unreachable; the loop always returns or raises
 
@@ -150,6 +164,7 @@ class HttpFetcher:
                 headers={"User-Agent": USER_AGENT},
                 timeout=self._timeout_s,
                 follow_redirects=True,
+                max_redirects=self._max_redirects,
                 http2=False,
             )
         return self._client

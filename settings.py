@@ -47,6 +47,10 @@ HTTP_TIMEOUT_S = 30.0
 HTTP_RETRIES = 3
 HTTP_BACKOFF_S = 1.0
 
+# HTTP redirects only — protocol and host normalisation. A wiki's own redirects
+# are not these: it serves the target's page under the alias, with no 3xx.
+MAX_REDIRECTS = 3
+
 # Retried, with backoff. 429 is deliberately absent: that is the server asking
 # us to stop, and retrying it is not backing off, it is knocking again.
 RETRYABLE_STATUS = frozenset({500, 502, 503, 504})

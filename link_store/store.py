@@ -136,7 +136,7 @@ class LinkStore:
         self.fetched += 1
         future = self._fetcher.submit([title])[title]
         try:
-            links = future.result(timeout=FETCH_TIMEOUT_S)
+            page = future.result(timeout=FETCH_TIMEOUT_S)
         except TimeoutError:
             self.note_failure(title, f"timed out after {FETCH_TIMEOUT_S:.0f}s")
             return None
@@ -144,15 +144,23 @@ class LinkStore:
             self.note_failure(title, f"{type(exc).__name__}: {exc}")
             return None
 
-        self.write(title, links)
-        return links
+        self.write(page)
+        return page.links
 
     def status(self, title: str) -> PageStatus | None:
-        """The title's status, or None if it is unknown — retrieving first."""
+        """The title's status, or None if it is unknown — retrieving first.
+
+        A redirect answers with its destination's status: it names that page,
+        and no caller outside this module has any use for the difference.
+        """
         known = self._db.status(title)
         if known is None and self._fetcher is not None:
             self.fetch_page(title)
             known = self._db.status(title)
+
+        if known == PageStatus.REDIRECT:
+            destination = self._db.destination(title)
+            known = self._db.status(destination) if destination else None
         return known
 
     def state(self, title: str) -> str:
@@ -167,14 +175,23 @@ class LinkStore:
         """Record why a retrieval failed, so a caller can say more than 'unknown'."""
         self.failures[title] = reason
 
-    def write(self, title: str, links: list[str] | None) -> None:
-        """Record what a retrieval found. Called by the batch as pages land."""
-        if links is None:
-            self.mark_red_links([title])
-            log.info("      no article at: %s", title)
+    def write(self, page: wikifetcher.Page) -> None:
+        """Record what a retrieval found. Called by the batch as pages land.
+
+        A page is filed under the title the fetch landed on, and the titles
+        that led there are recorded as pointing at it — so a redirect costs one
+        retrieval rather than one per name the article answers to.
+        """
+        if page.links is None:
+            self.mark_red_links([page.title])
+            log.info("      no article at: %s", page.title)
         else:
-            self.store(title, links)
-            log.debug("      store %s (%d link(s))", title, len(links))
+            self.store(page.title, page.links)
+            log.debug("      store %s (%d link(s))", page.title, len(page.links))
+
+        if page.aliases:
+            self._db.mark_redirects(page.aliases, page.title)
+            log.info("      %s redirects to %s", ", ".join(page.aliases), page.title)
 
     def store(self, title: str, links: list[str]) -> None:
         self._db.store(title, links)

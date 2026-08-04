@@ -11,7 +11,7 @@ fetcher takes titles and returns the titles they link to; the search and the
 store treat both as opaque names in a graph.
 """
 
-from .base import MAX_CONCURRENCY, USER_AGENT, Fetcher
+from .base import MAX_CONCURRENCY, USER_AGENT, Fetcher, Page
 from .html_links import extract_links
 from .http import HttpFetcher, PageUnavailable
 from .local import LocalFetcher
@@ -24,6 +24,7 @@ __all__ = [
     "Fetcher",
     "HttpFetcher",
     "LocalFetcher",
+    "Page",
     "PageUnavailable",
     "canonical",
     "extract_links",

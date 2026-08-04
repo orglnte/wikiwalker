@@ -16,6 +16,7 @@ import pytest
 
 from link_store import BatchLinks, LinkFetcher, LinkStore
 from walker import Walker
+from wikifetcher import Page
 
 
 class FakeFetcher:
@@ -23,10 +24,11 @@ class FakeFetcher:
 
     site = "test.invalid"
 
-    def __init__(self, pages, *, broken=(), delay_s=0.0):
+    def __init__(self, pages, *, broken=(), delay_s=0.0, redirects=None):
         self._pages = pages
         self._broken = set(broken)
         self._delay_s = delay_s
+        self._redirects = redirects or {}
         self.requested: list[str] = []
         self.in_flight = 0
         self.peak = 0
@@ -40,7 +42,10 @@ class FakeFetcher:
                 await asyncio.sleep(self._delay_s)
             if title in self._broken:
                 raise RuntimeError(f"cannot read {title}")
-            return self._pages.get(title)
+
+            landed = self._redirects.get(title, title)
+            aliases = [title] if landed != title else []
+            return Page(landed, self._pages.get(landed), aliases)
         finally:
             self.in_flight -= 1
 
@@ -100,6 +105,33 @@ def test_a_failed_fetch_is_not_recorded_as_anything() -> None:
 
 
 # --------------------------------------------------------------------------
+# Redirects
+# --------------------------------------------------------------------------
+
+def test_a_redirect_is_fetched_once_and_answers_under_both_names() -> None:
+    """One retrieval, two rows: the article under the title it really is, and
+    the title asked for pointing at it."""
+    factory = serving({"United_Kingdom": ["London"]}, redirects={"UK": "United_Kingdom"})
+
+    with LinkStore(":memory:", factory) as store:
+        assert store.get_links(["UK"]).get("UK") == ["London"]
+
+        # Asking again goes nowhere near the network, under either name.
+        assert store.get_links(["UK"]).get("UK") == ["London"]
+        assert store.get_links(["United_Kingdom"]).get("United_Kingdom") == ["London"]
+
+    assert factory.made["fetcher"].requested == ["UK"]
+
+
+def test_a_redirect_reports_the_state_of_what_it_names() -> None:
+    """Nothing above the store has any use for the difference."""
+    factory = serving({"United_Kingdom": ["London"]}, redirects={"UK": "United_Kingdom"})
+
+    with LinkStore(":memory:", factory) as store:
+        assert store.state("UK") == "article"
+
+
+# --------------------------------------------------------------------------
 # The batch
 # --------------------------------------------------------------------------
 
@@ -117,7 +149,7 @@ def test_closing_keeps_the_pages_that_landed_and_drops_the_queued() -> None:
     """A batch submits every title at once and a semaphore holds most of them
     back. Waiting on those would send requests the walk will never read."""
     landed: Future = Future()
-    landed.set_result(["X"])
+    landed.set_result(Page("Landed", ["X"]))
     queued: Future = Future()
 
     with LinkStore(":memory:") as store:

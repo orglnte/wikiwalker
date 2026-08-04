@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from . import sample_wiki
+from .base import Page
 from .html_links import extract_links
 
 log = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ class LocalFetcher:
         self._delay_s = delay_s
         self.calls = 0
 
-    async def fetch(self, title: str) -> list[str] | None:
+    async def fetch(self, title: str) -> Page:
         self.calls += 1
         if self._delay_s:
             await asyncio.sleep(self._delay_s)
@@ -35,11 +36,11 @@ class LocalFetcher:
         html = sample_wiki.render(title)
         if html is None:
             log.debug("        GET %s -> 404", title)
-            return None
+            return Page(title, None)
 
         # Parsing is pure Python and would otherwise hold the event loop for
         # the whole page. On a free-threaded build this also puts it on another
         # core; on a stock one it only stops the loop stalling.
         links = await asyncio.to_thread(extract_links, html, site=self.site)
         log.debug("        GET %s -> %dB, %d link(s)", title, len(html), len(links))
-        return links
+        return Page(title, links)

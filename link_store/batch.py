@@ -81,7 +81,7 @@ class BatchLinks(Mapping[str, "list[str] | None"]):
             return
 
         try:
-            links = future.result(timeout=FETCH_TIMEOUT_S)
+            page = future.result(timeout=FETCH_TIMEOUT_S)
         except TimeoutError:
             self._store.note_failure(title, f"timed out after {FETCH_TIMEOUT_S:.0f}s")
             log.warning("fetch timed out: %s", title)
@@ -91,5 +91,8 @@ class BatchLinks(Mapping[str, "list[str] | None"]):
             log.warning("fetch failed: %s (%s: %s)", title, type(exc).__name__, exc)
             return
 
-        self._store.write(title, links)
-        self._known[title] = links
+        self._store.write(page)
+
+        # Under the title asked for, which a redirect makes different from the
+        # one the page is filed under. Both name the same links.
+        self._known[title] = page.links
