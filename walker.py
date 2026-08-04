@@ -64,6 +64,11 @@ MODES = {
 
 
 
+# Returned by `_search_batch` when the page budget stops it, so the caller can
+# tell that apart from "the target is not in this batch".
+BUDGET_REACHED: list[str] = []
+
+
 STATE_MEANING = {
     "article": "so it has links to follow",
     "notfound": "so nothing leads out of it",
@@ -206,96 +211,35 @@ class Walker:
         # boundary between explored and not yet explored
         frontier = [source]
         expanded = 0
-        trace = log.isEnabledFor(logging.DEBUG)
 
         log.info("walk %s -> %s (max depth %d)", source, target, max_depth)
 
         for depth in range(max_depth):
             # All links at this frontier add to the next one
             next_frontier: list[str] = []
-            batch_number = 0
             logctx.depth.set(depth)
 
             # batched walk
-            for start in range(0, len(frontier), self._batch_size):
-                in_batch = {"expanded": 0, "red_links": 0, "failed": 0}
-                batch_number += 1
-                
+            starts = range(0, len(frontier), self._batch_size)
+            for batch_number, start in enumerate(starts, start=1):
                 batch = frontier[start : start + self._batch_size]
                 log.info(
                     "  depth %d batch %d links %d (max links %d)",
                     depth, batch_number, len(batch), self._batch_size)
 
-                # init LinkStore BatchLinks that returns a union of (db records, in-flight reqs)
-                self._linkstore.open_batch(batch)
+                found, expanded = self._search_batch(
+                    batch, target, parent, failed, next_frontier, expanded, max_walked,
+                )
 
-                for parent_page in batch:
-                    # Check if we are over the max pages budget
-                    if max_walked is not None and expanded >= max_walked:
-                        log.info("    stopping: page budget %d reached", max_walked)
-                        return WalkResult(
-                            None, depth, expanded, False,
-                            time.monotonic() - started, failed,
-                        )
-
-                    # NOTE this call blocks until the page is fetched (if not in db)
-                    outgoing_links = self._linkstore.links_of(parent_page)
-
-                    if outgoing_links is PAGE_FETCH_FAILED:
-                        # Could not be read: a gap in a dump, a failed fetch in
-                        # a crawl. Either way the walk is not exhaustive.
-                        # NOTE we do not retry for simplicity.
-                        # if you re-crawl manually, it will retry only the failed fetches.
-                        failed.add(parent_page)
-                        in_batch["failed"] += 1
-                        continue
-
-                    if outgoing_links is None:
-                        # A red link: some page linked here and the title 404s.
-                        # Skipping it.
-                        in_batch["red_links"] += 1
-                        continue
-
-                    expanded += 1
-                    in_batch["expanded"] += 1
-                    discovered = 0
-
-                    for link in outgoing_links:
-                        if link in parent:
-                            # Already discovered at this depth or a shallower one
-                            continue
-
-                        # Adding the new link -> containing page 
-                        parent[link] = parent_page
-                        discovered += 1
-
-                        # NOTE its found!
-                        if link == target:
-                            log.info("    %s links to %s — found", parent_page, target)
-                            return WalkResult(
-                                # NOTE extracts the path from source to target
-                                _reconstruct(parent, target),
-                                depth + 1,
-                                expanded,
-                                not failed,
-                                time.monotonic() - started,
-                                failed,
-                            )
-
-                        # We will read the link at the next frontier
-                        next_frontier.append(link)
-
-                    if trace:
-                        log.debug(
-                            "      expand %s: %d link(s), %d new",
-                            parent_page, len(outgoing_links), discovered,
-                        )
-
-                if in_batch["red_links"] or in_batch["failed"]:
-                    log.info(
-                        "    %d expanded, %d red link(s) (link pointing to a "
-                        "notfound page), %d failed",
-                        in_batch["expanded"], in_batch["red_links"], in_batch["failed"],
+                if found is BUDGET_REACHED:
+                    return WalkResult(
+                        None, depth, expanded, False,
+                        time.monotonic() - started, failed,
+                    )
+                if found is not None:
+                    return WalkResult(
+                        found, depth + 1, expanded, not failed,
+                        time.monotonic() - started, failed,
                     )
 
             if not next_frontier:
@@ -314,6 +258,88 @@ class Walker:
         return WalkResult(
             None, max_depth, expanded, False, time.monotonic() - started, failed
         )
+
+    def _search_batch(
+        self,
+        batch: list[str],
+        target: str,
+        parent: dict[str, str | None],
+        failed: set[str],
+        next_frontier: list[str],
+        expanded: int,
+        max_walked: int | None,
+    ) -> tuple[list[str] | None, int]:
+        """Expand one batch, growing `parent`, `failed` and `next_frontier`.
+
+        Returns the path if the target turned up, BUDGET_REACHED if the page
+        budget ran out, otherwise None — and the running count of pages
+        expanded, which is a number rather than something to mutate.
+        """
+        in_batch = {"expanded": 0, "red_links": 0, "failed": 0}
+        trace = log.isEnabledFor(logging.DEBUG)
+
+        # init the BatchLinks that will answer from (db rows, in-flight fetches)
+        self._linkstore.open_batch(batch)
+
+        for parent_page in batch:
+            if max_walked is not None and expanded >= max_walked:
+                log.info("    stopping: page budget %d reached", max_walked)
+                return BUDGET_REACHED, expanded
+
+            # NOTE this call blocks until the page is fetched (if not in db)
+            outgoing_links = self._linkstore.links_of(parent_page)
+
+            if outgoing_links is PAGE_FETCH_FAILED:
+                # Could not be read: a gap in a dump, a failed fetch in a crawl.
+                # Either way the walk is not exhaustive.
+                # NOTE we do not retry for simplicity.
+                # if you re-crawl manually, it will retry only the failed fetches.
+                failed.add(parent_page)
+                in_batch["failed"] += 1
+                continue
+
+            if outgoing_links is None:
+                # A red link: some page linked here and the title 404s.
+                # Skipping it.
+                in_batch["red_links"] += 1
+                continue
+
+            expanded += 1
+            in_batch["expanded"] += 1
+            discovered = 0
+
+            for link in outgoing_links:
+                if link in parent:
+                    # Already discovered at this depth or a shallower one
+                    continue
+
+                # Written on first sight, so a page linked from many others is
+                # queued once rather than once per link.
+                parent[link] = parent_page
+                discovered += 1
+
+                if link == target:
+                    log.info("    %s links to %s — found", parent_page, target)
+                    # NOTE extracts the path from source to target
+                    return _reconstruct(parent, target), expanded
+
+                # We will read the link at the next frontier
+                next_frontier.append(link)
+
+            if trace:
+                log.debug(
+                    "      expand %s: %d link(s), %d new",
+                    parent_page, len(outgoing_links), discovered,
+                )
+
+        if in_batch["red_links"] or in_batch["failed"]:
+            log.info(
+                "    %d expanded, %d red link(s) (link pointing to a "
+                "notfound page), %d failed",
+                in_batch["expanded"], in_batch["red_links"], in_batch["failed"],
+            )
+
+        return None, expanded
 
 def _reconstruct(parent: dict[str, str | None], target: str) -> list[str]:
     """Walk the parent chain from `target` back to the source, then reverse it.
